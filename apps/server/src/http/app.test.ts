@@ -46,7 +46,8 @@ describe("local HTTP room seam", () => {
     const store = new RoomStore(join(root, "room.db"));
     const application = createHttpApplication({
       store,
-      providers: new Map([["openrouter", new FixtureProvider()]])
+      providers: new Map([["openrouter", new FixtureProvider()]]),
+      automaticScheduling: false
     });
 
     const created = await request(application)
@@ -102,6 +103,15 @@ describe("local HTTP room seam", () => {
         costUsd: 0.002
       }
     ]);
+
+    await request(application)
+      .patch(`/api/v1/rooms/${roomId}/agents/systems/runtime`)
+      .send({ muted: true })
+      .expect(200);
+    await request(application)
+      .post(`/api/v1/rooms/${roomId}/speakers/systems`)
+      .send({})
+      .expect(409);
 
     store.close();
   });

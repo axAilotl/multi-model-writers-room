@@ -75,10 +75,16 @@ export class WorkspaceService {
     try {
       const chunks = await this.parse(input.mediaType, input.filename, input.bytes);
       if (chunks.length === 0) throw new Error("No text could be extracted");
-      const embeddings = await this.options.embeddings.embedDocuments(
-        chunks.map(chunk => `search_document: ${chunk.text}`)
-      );
-      this.repository.replaceChunks(artifact.id, chunks, embeddings);
+      this.repository.replaceChunks(artifact.id, chunks);
+      let semanticError: string | undefined;
+      try {
+        const embeddings = await this.options.embeddings.embedDocuments(
+          chunks.map(chunk => `search_document: ${chunk.text}`)
+        );
+        this.repository.updateEmbeddings(chunks, embeddings);
+      } catch (error) {
+        semanticError = error instanceof Error ? error.message : String(error);
+      }
       let summary: { summary: string; outline?: string };
       try {
         summary = await this.options.housekeeping.summarize({
@@ -98,7 +104,10 @@ export class WorkspaceService {
         summary: summary.summary,
         ...(summary.outline ? { outline: summary.outline } : {}),
         ingestionStatus: "ready",
-        ingestionStage: "ready"
+        ingestionStage: semanticError ? "ready_lexical" : "ready",
+        ...(semanticError === undefined
+          ? {}
+          : { error: `Semantic indexing unavailable: ${semanticError}` })
       });
       return artifact;
     } catch (error) {
@@ -127,8 +136,32 @@ export class WorkspaceService {
     return this.repository.getArtifact(artifactId);
   }
 
+  getArtifactForRoom(roomId: string, artifactId: string): WorkspaceArtifact {
+    const artifact = this.repository.getArtifact(artifactId);
+    if (artifact.roomId !== roomId) {
+      throw new Error("Artifact does not belong to this room");
+    }
+    return artifact;
+  }
+
   readRange(artifactId: string, start: number, end: number): ArtifactChunk[] {
     return this.repository.readRange(artifactId, start, end);
+  }
+
+  readRangeForRoom(
+    roomId: string,
+    artifactId: string,
+    start: number,
+    end: number
+  ): ArtifactChunk[] {
+    this.getArtifactForRoom(roomId, artifactId);
+    return this.repository.readRange(artifactId, start, end);
+  }
+
+  getChunkForRoom(roomId: string, chunkId: string): ArtifactChunk {
+    const chunk = this.repository.getChunk(chunkId);
+    this.getArtifactForRoom(roomId, chunk.artifactId);
+    return chunk;
   }
 
   findExact(input: {
@@ -156,17 +189,28 @@ export class WorkspaceService {
       .join("\n\n");
   }
 
+  health(): { vectorExtensionAvailable: boolean } {
+    return {
+      vectorExtensionAvailable: this.repository.vectorExtensionAvailable
+    };
+  }
+
   async search(input: {
     roomId: string;
     query: string;
     limit?: number;
   }): Promise<WorkspaceSearchResult[]> {
     const limit = Math.max(1, Math.min(20, input.limit ?? 8));
-    const [queryEmbedding, lexical] = await Promise.all([
-      this.options.embeddings.embedQuery(`search_query: ${input.query}`),
-      Promise.resolve(this.repository.lexicalCandidates(input.roomId, input.query, 50))
-    ]);
-    const vector = this.repository.vectorCandidates(input.roomId, queryEmbedding, 50);
+    const lexical = this.repository.lexicalCandidates(input.roomId, input.query, 50);
+    let vector: ReturnType<WorkspaceRepository["vectorCandidates"]> = [];
+    try {
+      const queryEmbedding = await this.options.embeddings.embedQuery(
+        `search_query: ${input.query}`
+      );
+      vector = this.repository.vectorCandidates(input.roomId, queryEmbedding, 50);
+    } catch {
+      vector = [];
+    }
     return this.repository.fuse({ lexical, vector, limit });
   }
 

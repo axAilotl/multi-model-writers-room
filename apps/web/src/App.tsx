@@ -21,6 +21,7 @@ import {
   Users,
   Volume2,
   VolumeX,
+  Wrench,
   X
 } from "lucide-react";
 import {
@@ -39,6 +40,7 @@ import type {
   RoomSnapshot,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
+import { defaultRoomToolNames } from "@writers-room/contracts";
 import { api } from "./api.js";
 
 const participantColors = ["#c96c47", "#637d68", "#7566a3", "#b08a3f", "#477b8f"];
@@ -66,11 +68,17 @@ function generationFor(
   return snapshot.generations.find(generation => generation.id === message.generationId);
 }
 
-function MessageDetails({ generation, message }: {
+function MessageDetails({ generation }: {
   generation: GenerationRecord;
-  message: RoomMessage;
 }) {
   const [open, setOpen] = useState(false);
+  const [inspection, setInspection] = useState<Awaited<
+    ReturnType<typeof api.inspectGeneration>
+  >>();
+  useEffect(() => {
+    if (!open || inspection) return;
+    void api.inspectGeneration(generation.id).then(setInspection);
+  }, [open, generation.id, inspection]);
   return (
     <div className="message-details">
       <button className="detail-toggle" onClick={() => setOpen(value => !value)}>
@@ -106,11 +114,38 @@ function MessageDetails({ generation, message }: {
               <strong>{generation.costUsd == null ? "—" : `$${generation.costUsd.toFixed(4)}`}</strong>
             </div>
           </section>
-          {message.citedChunkIds.length > 0 && (
+          {inspection && inspection.citations.length > 0 && (
             <section>
               <span className="detail-label">Retrieved sources</span>
-              <div className="source-pills">
-                {message.citedChunkIds.map(id => <code key={id}>{id.slice(0, 8)}</code>)}
+              <div className="evidence-list">
+                {inspection.citations.map(citation => (
+                  <div key={citation.chunkId}>
+                    <strong>
+                      {citation.filename}
+                      {citation.headingPath
+                        ? ` § ${citation.headingPath}`
+                        : citation.pageNumber
+                          ? ` · page ${citation.pageNumber}`
+                          : ""}
+                    </strong>
+                    <span>{citation.text.slice(0, 180)}</span>
+                    <code>{citation.chunkId}</code>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          {inspection && inspection.toolCalls.length > 0 && (
+            <section>
+              <span className="detail-label">Tools</span>
+              <div className="tool-list">
+                {inspection.toolCalls.map(call => (
+                  <div key={call.id}>
+                    <Wrench size={11} />
+                    <strong>{call.toolName}</strong>
+                    <span>{call.status}</span>
+                  </div>
+                ))}
               </div>
             </section>
           )}
@@ -158,7 +193,7 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
               <div className="message-copy">
                 {message.content || <span className="thinking">Gathering a thought…</span>}
               </div>
-              {generation && <MessageDetails generation={generation} message={message} />}
+              {generation && <MessageDetails generation={generation} />}
               {isTail && (
                 <div className="tail-actions">
                   <button onClick={onRegenerateTail} disabled={busy}>
@@ -320,17 +355,7 @@ function AddAgent({ roomId, onAdded, onClose }: {
         temperature: 0.7,
         maxOutputTokens: 1_200,
         reasoning: { enabled: true, effort: "medium", displayMode: "summary" },
-        tools: [
-          "list_workspace",
-          "get_artifact_summary",
-          "search_workspace",
-          "find_exact_text",
-          "read_artifact_chunk",
-          "read_artifact_range",
-          "read_shared_scratchpad",
-          "append_shared_note",
-          "inspect_room_state"
-        ],
+        tools: [...defaultRoomToolNames],
         contextBudget: {
           softLimitTokens: 120_000,
           hardLimitTokens: 160_000,
@@ -400,6 +425,7 @@ function ParticipantsPanel({ snapshot, onChanged, onAdd }: {
           const generating = snapshot.generations.some(
             generation => generation.agentId === agent.id && generation.status === "streaming"
           );
+          const activation = snapshot.activations.find(item => item.agentId === agent.id);
           return (
             <div className="participant" key={agent.id}>
               <div className="participant-head">
@@ -413,6 +439,12 @@ function ParticipantsPanel({ snapshot, onChanged, onAdd }: {
                 <span className={`presence ${generating ? "speaking" : ""}`} />
               </div>
               <p>{agent.description || "A distinct room participant."}</p>
+              {activation?.decision.reason && (
+                <div className="activation-reason" title={`Activation score ${activation.score.toFixed(2)}`}>
+                  <BrainCircuit size={11} />
+                  <span>{activation.decision.reason}</span>
+                </div>
+              )}
               <div className="fatigue-row">
                 <Gauge size={12} />
                 <span>Fatigue</span>

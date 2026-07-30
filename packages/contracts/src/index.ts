@@ -200,6 +200,21 @@ export interface NormalizedToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+export const defaultRoomToolNames = [
+  "list_workspace",
+  "get_artifact_summary",
+  "search_workspace",
+  "find_exact_text",
+  "read_artifact_chunk",
+  "read_artifact_range",
+  "read_shared_scratchpad",
+  "append_shared_note",
+  "update_shared_note",
+  "inspect_room_state",
+  "yield_turn",
+  "request_another_agent"
+] as const;
+
 export interface NormalizedChatRequest {
   modelId: string;
   messages: NormalizedChatMessage[];
@@ -302,5 +317,11 @@ export interface RoomSnapshot {
   runtime: AgentRuntimeState[];
   artifacts: WorkspaceArtifact[];
   notes: SharedNote[];
+  activations: Array<{
+    sequence: number;
+    agentId: string;
+    decision: ActivationDecision;
+    score: number;
+  }>;
   latestSequence: number;
 }

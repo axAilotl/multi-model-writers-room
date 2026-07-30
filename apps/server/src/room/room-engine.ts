@@ -43,6 +43,9 @@ export class RoomEngine {
     if (snapshot.room.status !== "running") throw new Error("Room is paused");
     const agent = snapshot.agents.find(candidate => candidate.id === input.agentId);
     if (!agent) throw new Error(`Agent not found in room: ${input.agentId}`);
+    if (this.store.getRuntime(input.roomId, agent.id).muted) {
+      throw new Error(`Agent is muted: ${agent.id}`);
+    }
     const provider = this.providers.get(agent.provider);
     if (!provider) throw new Error(`Provider is not configured: ${agent.provider}`);
     if ([...this.active.values()].some(active =>
@@ -168,6 +171,11 @@ export class RoomEngine {
         completedAt,
         latencyMs: Date.now() - startedAtMs
       });
+      this.store.recordCitations({
+        generationId,
+        messageId: message.id,
+        chunkIds: generation.retrievedChunkIds
+      });
       const completeMessage = this.store.updateMessage(message.id, {
         content: generation.finalText,
         status: "complete",
@@ -208,6 +216,16 @@ export class RoomEngine {
     let interrupted = 0;
     for (const active of this.active.values()) {
       if (active.roomId !== roomId) continue;
+      active.controller.abort();
+      interrupted += 1;
+    }
+    return interrupted;
+  }
+
+  interruptAgent(roomId: string, agentId: string): number {
+    let interrupted = 0;
+    for (const active of this.active.values()) {
+      if (active.roomId !== roomId || active.agentId !== agentId) continue;
       active.controller.abort();
       interrupted += 1;
     }

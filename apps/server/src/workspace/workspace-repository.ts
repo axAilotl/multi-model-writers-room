@@ -166,9 +166,9 @@ export class WorkspaceRepository {
   replaceChunks(
     artifactId: string,
     chunks: ArtifactChunk[],
-    embeddings: Float32Array[]
+    embeddings?: Float32Array[]
   ): void {
-    if (chunks.length !== embeddings.length) {
+    if (embeddings && chunks.length !== embeddings.length) {
       throw new Error("Every chunk requires exactly one embedding");
     }
     this.store.database.transaction(() => {
@@ -188,8 +188,25 @@ export class WorkspaceRepository {
           complete.ordinal,
           complete.text,
           JSON.stringify(complete),
-          fromEmbedding(embeddings[index]!)
+          embeddings ? fromEmbedding(embeddings[index]!) : null
         );
+      });
+    })();
+  }
+
+  updateEmbeddings(
+    chunks: ArtifactChunk[],
+    embeddings: Float32Array[]
+  ): void {
+    if (chunks.length !== embeddings.length) {
+      throw new Error("Every chunk requires exactly one embedding");
+    }
+    const update = this.store.database.prepare(
+      "UPDATE artifact_chunks SET embedding = ? WHERE id = ?"
+    );
+    this.store.database.transaction(() => {
+      chunks.forEach((chunk, index) => {
+        update.run(fromEmbedding(embeddings[index]!), chunk.id);
       });
     })();
   }

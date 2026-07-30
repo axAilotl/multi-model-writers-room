@@ -74,6 +74,7 @@ export class RoomStore {
     this.database.pragma("foreign_keys = ON");
     this.database.pragma("busy_timeout = 5000");
     migrate(this.database);
+    this.reconcileInterruptedWork();
   }
 
   close(): void {
@@ -165,6 +166,13 @@ export class RoomStore {
   addAgent(roomId: string, definition: AgentDefinition): AgentDefinition {
     this.getRoom(roomId);
     const agent = agentDefinitionSchema.parse(definition);
+    const existingAgents = this.listAgents(roomId);
+    if (
+      existingAgents.length >= 5 &&
+      !existingAgents.some(existing => existing.id === agent.id)
+    ) {
+      throw new Error("A room supports at most five model participants");
+    }
     const now = new Date().toISOString();
     this.database.transaction(() => {
       this.database.prepare(`
@@ -273,13 +281,17 @@ export class RoomStore {
 
   updateNote(
     noteId: string,
-    patch: { text?: string; category?: string; archive?: boolean }
+    patch: { text?: string; category?: string; archive?: boolean },
+    roomId?: string
   ): SharedNote {
     const row = this.database.prepare(
       "SELECT payload_json FROM shared_notes WHERE id = ?"
     ).get(noteId) as JsonRow | undefined;
     if (!row) throw new Error(`Shared note not found: ${noteId}`);
     const current = sharedNoteSchema.parse(JSON.parse(row.payload_json));
+    if (roomId !== undefined && current.roomId !== roomId) {
+      throw new Error("Shared note does not belong to this room");
+    }
     const now = new Date().toISOString();
     const note = sharedNoteSchema.parse({
       ...current,
@@ -329,6 +341,154 @@ export class RoomStore {
       new Date().toISOString(),
       input.id
     );
+  }
+
+  recordCitations(input: {
+    generationId: string;
+    messageId: string;
+    chunkIds: string[];
+  }): void {
+    if (input.chunkIds.length === 0) return;
+    const generation = this.getGeneration(input.generationId);
+    const message = this.getMessage(input.messageId);
+    if (
+      generation.messageId !== message.id ||
+      generation.roomId !== message.roomId
+    ) {
+      throw new Error("Citation generation/message binding is invalid");
+    }
+    const insert = this.database.prepare(`
+      INSERT INTO citations(id, generation_id, message_id, chunk_id, created_at)
+      SELECT ?, ?, ?, c.id, ?
+      FROM artifact_chunks c
+      JOIN artifacts a ON a.id = c.artifact_id
+      WHERE c.id = ? AND a.room_id = ?
+      ON CONFLICT(generation_id, chunk_id) DO NOTHING
+    `);
+    this.database.transaction(() => {
+      for (const chunkId of new Set(input.chunkIds)) {
+        const result = insert.run(
+          uuidv7(),
+          input.generationId,
+          input.messageId,
+          new Date().toISOString(),
+          chunkId,
+          generation.roomId
+        );
+        if (result.changes !== 1) {
+          throw new Error(`Cited chunk does not belong to the generation room: ${chunkId}`);
+        }
+      }
+    })();
+  }
+
+  getGenerationInspection(generationId: string): {
+    events: Array<{
+      ordinal: number;
+      type: string;
+      payload: unknown;
+      createdAt: string;
+    }>;
+    toolCalls: Array<{
+      id: string;
+      toolName: string;
+      arguments: unknown;
+      result: unknown;
+      status: string;
+      createdAt: string;
+      completedAt?: string;
+    }>;
+    citations: Array<{
+      chunkId: string;
+      artifactId: string;
+      filename: string;
+      text: string;
+      headingPath?: string;
+      pageNumber?: number;
+      lineStart?: number;
+      lineEnd?: number;
+    }>;
+  } {
+    this.getGeneration(generationId);
+    const events = this.database.prepare(`
+      SELECT ordinal, type, payload_json, created_at
+      FROM generation_events
+      WHERE generation_id = ?
+      ORDER BY ordinal
+    `).all(generationId).map(row => {
+      const value = row as {
+        ordinal: number;
+        type: string;
+        payload_json: string;
+        created_at: string;
+      };
+      return {
+        ordinal: value.ordinal,
+        type: value.type,
+        payload: JSON.parse(value.payload_json) as unknown,
+        createdAt: value.created_at
+      };
+    });
+    const toolCalls = this.database.prepare(`
+      SELECT id, tool_name, arguments_json, result_json, status, created_at, completed_at
+      FROM tool_calls
+      WHERE generation_id = ?
+      ORDER BY created_at
+    `).all(generationId).map(row => {
+      const value = row as {
+        id: string;
+        tool_name: string;
+        arguments_json: string;
+        result_json: string | null;
+        status: string;
+        created_at: string;
+        completed_at: string | null;
+      };
+      return {
+        id: value.id,
+        toolName: value.tool_name,
+        arguments: JSON.parse(value.arguments_json) as unknown,
+        result: value.result_json ? JSON.parse(value.result_json) as unknown : null,
+        status: value.status,
+        createdAt: value.created_at,
+        ...(value.completed_at ? { completedAt: value.completed_at } : {})
+      };
+    });
+    const citations = this.database.prepare(`
+      SELECT c.chunk_id, a.id AS artifact_id, a.payload_json AS artifact_json,
+             ac.payload_json AS chunk_json
+      FROM citations c
+      JOIN artifact_chunks ac ON ac.id = c.chunk_id
+      JOIN artifacts a ON a.id = ac.artifact_id
+      WHERE c.generation_id = ?
+      ORDER BY c.created_at
+    `).all(generationId).map(row => {
+      const value = row as {
+        chunk_id: string;
+        artifact_id: string;
+        artifact_json: string;
+        chunk_json: string;
+      };
+      const artifact = artifactSchema.parse(JSON.parse(value.artifact_json));
+      const chunk = JSON.parse(value.chunk_json) as {
+        text: string;
+        headingPath?: string;
+        pageNumber?: number;
+        lineStart?: number;
+        lineEnd?: number;
+      };
+      return {
+        chunkId: value.chunk_id,
+        artifactId: value.artifact_id,
+        filename: artifact.filename,
+        text: chunk.text,
+        ...(chunk.headingPath === undefined ? {} : { headingPath: chunk.headingPath }),
+        ...(chunk.pageNumber === undefined ? {} : { pageNumber: chunk.pageNumber }),
+        ...(chunk.lineStart === undefined ? {} : { lineStart: chunk.lineStart }),
+        ...(chunk.lineEnd === undefined ? {} : { lineEnd: chunk.lineEnd })
+      };
+    });
+    return { events, toolCalls, citations };
   }
 
   appendMessage(input: MessageInput): RoomMessage {
@@ -567,6 +727,25 @@ export class RoomStore {
         roomId,
         value => sharedNoteSchema.parse(value)
       ),
+      activations: this.database.prepare(`
+        SELECT sequence, payload_json
+        FROM room_events
+        WHERE room_id = ? AND type = 'activation.recorded'
+        ORDER BY sequence DESC
+        LIMIT 100
+      `).all(roomId).map(row => {
+        const value = row as { sequence: number; payload_json: string };
+        const event = JSON.parse(value.payload_json) as Extract<
+          RoomStreamEvent,
+          { type: "activation.recorded" }
+        >;
+        return {
+          sequence: value.sequence,
+          agentId: event.agentId,
+          decision: event.decision,
+          score: event.score
+        };
+      }),
       latestSequence: (roomRow as StoredRoomRow).latest_sequence
     };
   }
@@ -628,5 +807,62 @@ export class RoomStore {
     return this.database.prepare(sql).all(parameter).map(row =>
       parse(JSON.parse((row as JsonRow).payload_json))
     );
+  }
+
+  private reconcileInterruptedWork(): void {
+    const now = new Date().toISOString();
+    this.database.transaction(() => {
+      const generations = this.database.prepare(`
+        SELECT id, payload_json FROM generations
+        WHERE status IN ('queued', 'streaming')
+      `).all() as Array<{ id: string; payload_json: string }>;
+      for (const row of generations) {
+        const generation = generationRecordSchema.parse(JSON.parse(row.payload_json));
+        const interrupted = generationRecordSchema.parse({
+          ...generation,
+          status: "interrupted",
+          completedAt: now,
+          error: "Generation interrupted by process restart"
+        });
+        this.database.prepare(`
+          UPDATE generations
+          SET status = 'interrupted', payload_json = ?, completed_at = ?
+          WHERE id = ?
+        `).run(JSON.stringify(interrupted), now, row.id);
+      }
+
+      const messages = this.database.prepare(`
+        SELECT id, payload_json FROM messages WHERE status = 'streaming'
+      `).all() as Array<{ id: string; payload_json: string }>;
+      for (const row of messages) {
+        const message = roomMessageSchema.parse(JSON.parse(row.payload_json));
+        const interrupted = roomMessageSchema.parse({
+          ...message,
+          status: "interrupted"
+        });
+        this.database.prepare(`
+          UPDATE messages SET status = 'interrupted', payload_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(JSON.stringify(interrupted), now, row.id);
+      }
+
+      const artifacts = this.database.prepare(`
+        SELECT id, payload_json FROM artifacts
+        WHERE json_extract(payload_json, '$.ingestionStatus') IN ('queued', 'processing')
+      `).all() as Array<{ id: string; payload_json: string }>;
+      for (const row of artifacts) {
+        const artifact = artifactSchema.parse(JSON.parse(row.payload_json));
+        const failed = artifactSchema.parse({
+          ...artifact,
+          ingestionStatus: "failed",
+          ingestionStage: "interrupted",
+          error: "Ingestion interrupted by process restart; upload the artifact again.",
+          updatedAt: now
+        });
+        this.database.prepare(`
+          UPDATE artifacts SET payload_json = ?, updated_at = ? WHERE id = ?
+        `).run(JSON.stringify(failed), now, row.id);
+      }
+    })();
   }
 }

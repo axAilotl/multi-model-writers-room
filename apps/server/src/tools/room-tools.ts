@@ -52,7 +52,14 @@ const schemas = {
     note_id: z.string(),
     text: z.string().min(1).max(4_000)
   }),
-  inspect_room_state: z.object({})
+  inspect_room_state: z.object({}),
+  yield_turn: z.object({
+    reason: z.string().max(500).optional()
+  }),
+  request_another_agent: z.object({
+    agent_id: z.string(),
+    reason: z.string().min(1).max(500)
+  })
 } as const;
 
 type ToolName = keyof typeof schemas;
@@ -67,7 +74,9 @@ const descriptions: Record<ToolName, string> = {
   read_shared_scratchpad: "Read current non-archived shared room notes.",
   append_shared_note: "Append a concise shared note with attribution.",
   update_shared_note: "Update a shared note.",
-  inspect_room_state: "Inspect room controls and participant runtime state."
+  inspect_room_state: "Inspect room controls and participant runtime state.",
+  yield_turn: "Explicitly end the current intervention without further tool work.",
+  request_another_agent: "Request that another named room participant examine a question."
 };
 
 function definition(name: ToolName): NormalizedToolDefinition {
@@ -147,7 +156,12 @@ export class RoomToolExecutor implements ToolExecutor {
         };
       case "get_artifact_summary":
         return {
-          content: JSON.stringify(this.workspace.getArtifact(args.artifact_id as string)),
+          content: JSON.stringify(
+            this.workspace.getArtifactForRoom(
+              input.roomId,
+              args.artifact_id as string
+            )
+          ),
           citedChunkIds: []
         };
       case "search_workspace": {
@@ -181,15 +195,22 @@ export class RoomToolExecutor implements ToolExecutor {
         };
       }
       case "read_artifact_chunk": {
-        const chunk = this.workspace.getChunk(args.chunk_id as string);
-        const artifact = this.workspace.getArtifact(chunk.artifactId);
+        const chunk = this.workspace.getChunkForRoom(
+          input.roomId,
+          args.chunk_id as string
+        );
+        const artifact = this.workspace.getArtifactForRoom(
+          input.roomId,
+          chunk.artifactId
+        );
         return {
           content: `${formatCitation(artifact, chunk)}\n${chunk.text}`,
           citedChunkIds: [chunk.id]
         };
       }
       case "read_artifact_range": {
-        const chunks = this.workspace.readRange(
+        const chunks = this.workspace.readRangeForRoom(
+          input.roomId,
           args.artifact_id as string,
           args.start as number,
           args.end as number
@@ -219,9 +240,11 @@ export class RoomToolExecutor implements ToolExecutor {
         return { content: JSON.stringify(note), citedChunkIds: [] };
       }
       case "update_shared_note": {
-        const note = this.store.updateNote(args.note_id as string, {
-          text: args.text as string
-        });
+        const note = this.store.updateNote(
+          args.note_id as string,
+          { text: args.text as string },
+          input.roomId
+        );
         return { content: JSON.stringify(note), citedChunkIds: [] };
       }
       case "inspect_room_state": {
@@ -234,6 +257,31 @@ export class RoomToolExecutor implements ToolExecutor {
               name: agent.name
             })),
             runtime: snapshot.runtime
+          }),
+          citedChunkIds: []
+        };
+      }
+      case "yield_turn":
+        return {
+          content: JSON.stringify({ yielded: true, reason: args.reason ?? null }),
+          citedChunkIds: []
+        };
+      case "request_another_agent": {
+        const requested = this.store.listAgents(input.roomId)
+          .find(agent => agent.id === args.agent_id);
+        if (!requested) throw new Error(`Requested agent is not in the room: ${String(args.agent_id)}`);
+        const note = this.store.appendNote({
+          roomId: input.roomId,
+          authorType: "agent",
+          authorId: input.agentId,
+          category: "agent-request",
+          text: `Request for ${requested.name}: ${String(args.reason)}`
+        });
+        return {
+          content: JSON.stringify({
+            requestedAgentId: requested.id,
+            noteId: note.id,
+            queued: false
           }),
           citedChunkIds: []
         };

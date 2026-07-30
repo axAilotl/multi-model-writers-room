@@ -126,6 +126,15 @@ button { color: inherit; }
 .detail-grid span, .detail-grid strong { display: block; } .detail-grid strong { margin-top: 2px; font-size: 9px; font-weight: 600; }
 .source-pills { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 .source-pills code { padding: 3px 5px; background: #e7e2d6; border-radius: 3px; color: #786957; font-size: 8px; }
+.evidence-list { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; }
+.evidence-list > div { padding: 7px; background: #e8e4da; border-radius: 4px; }
+.evidence-list strong, .evidence-list span, .evidence-list code { display: block; }
+.evidence-list strong { font-size: 9px; color: #625849; }
+.evidence-list span { color: #777064; line-height: 1.4; margin: 3px 0; }
+.evidence-list code { color: #9a8c78; font-size: 7px; overflow: hidden; text-overflow: ellipsis; }
+.tool-list { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; }
+.tool-list > div { display: grid; grid-template-columns: 13px 1fr auto; align-items: center; gap: 5px; padding: 5px 6px; background: #e8e4da; border-radius: 4px; }
+.tool-list strong { font-size: 9px; } .tool-list span { color: #898378; font-size: 8px; text-transform: uppercase; }
 .tail-actions { display: flex; gap: 4px; margin-top: 6px; opacity: 0; transition: opacity .15s; }
 .message:hover .tail-actions { opacity: 1; }
 .tail-actions button { display: flex; gap: 4px; align-items: center; border: 0; background: transparent; color: #8d887c; font-size: 9px; padding: 3px; cursor: pointer; }
@@ -148,6 +157,8 @@ button { color: inherit; }
 .presence { width: 7px; height: 7px; border-radius: 50%; background: #9da498; }
 .presence.speaking { background: #d17952; box-shadow: 0 0 0 3px #d1795224; animation: pulse 1.5s infinite; }
 .participant p { color: #807b70; font-size: 9px; line-height: 1.4; margin: 8px 0; }
+.activation-reason { display: flex; align-items: flex-start; gap: 5px; color: #858075; background: #f0ede5; border-radius: 4px; padding: 5px 6px; font-size: 8px; line-height: 1.35; margin-bottom: 8px; }
+.activation-reason svg { flex: 0 0 auto; color: #7a6c91; margin-top: 1px; }
 .fatigue-row { display: grid; grid-template-columns: 12px 38px 1fr 23px; align-items: center; gap: 4px; color: #969084; font-size: 8px; }
 .fatigue-track { height: 3px; border-radius: 4px; background: #dedad0; overflow: hidden; }
 .fatigue-track i { display: block; height: 100%; background: #b88959; border-radius: 4px; }

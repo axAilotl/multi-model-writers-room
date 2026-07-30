@@ -94,4 +94,72 @@ describe("shared workspace seam", () => {
     );
     store.close();
   });
+
+  it("keeps lexical evidence available when local semantic inference is unavailable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-lexical-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Degraded evidence room" });
+    const unavailableEmbeddings: EmbeddingModel = {
+      dimensions: 512,
+      embedDocuments: async () => {
+        throw new Error("local model unavailable");
+      },
+      embedQuery: async () => {
+        throw new Error("local model unavailable");
+      }
+    };
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: unavailableEmbeddings,
+      housekeeping
+    });
+
+    const artifact = await workspace.ingest({
+      roomId: room.id,
+      filename: "constraints.txt",
+      mediaType: "text/plain",
+      bytes: Buffer.from("Evidence remains searchable during model recovery.")
+    });
+    const results = await workspace.search({
+      roomId: room.id,
+      query: "searchable recovery"
+    });
+
+    expect(artifact).toMatchObject({
+      ingestionStatus: "ready",
+      ingestionStage: "ready_lexical"
+    });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.chunk.text).toContain("Evidence remains searchable");
+    store.close();
+  });
+
+  it("rejects stable artifact and chunk IDs when used from another room", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-isolation-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const firstRoom = store.createRoom({ title: "First room" });
+    const secondRoom = store.createRoom({ title: "Second room" });
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: new FixtureEmbeddingModel(),
+      housekeeping
+    });
+    const artifact = await workspace.ingest({
+      roomId: firstRoom.id,
+      filename: "private.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("# Evidence\nOnly the first room can retrieve this.")
+    });
+    const chunk = workspace.listChunks(artifact.id)[0]!;
+
+    expect(() => workspace.getArtifactForRoom(secondRoom.id, artifact.id))
+      .toThrow(/does not belong/);
+    expect(() => workspace.getChunkForRoom(secondRoom.id, chunk.id))
+      .toThrow(/does not belong/);
+    store.close();
+  });
 });

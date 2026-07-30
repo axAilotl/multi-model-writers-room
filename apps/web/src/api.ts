@@ -117,6 +117,28 @@ export const api = {
     return requestJson(`/api/v1/rooms/${roomId}/messages/tail`, {
       method: "DELETE"
     });
+  },
+
+  inspectGeneration(generationId: string): Promise<{
+    events: Array<{ ordinal: number; type: string; payload: unknown; createdAt: string }>;
+    toolCalls: Array<{
+      id: string;
+      toolName: string;
+      arguments: unknown;
+      result: unknown;
+      status: string;
+    }>;
+    citations: Array<{
+      chunkId: string;
+      artifactId: string;
+      filename: string;
+      text: string;
+      headingPath?: string;
+      pageNumber?: number;
+      lineStart?: number;
+      lineEnd?: number;
+    }>;
+  }> {
+    return requestJson(`/api/v1/generations/${generationId}/inspection`);
   }
 };
-

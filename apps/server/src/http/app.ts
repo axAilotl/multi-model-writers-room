@@ -65,7 +65,8 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     response.json({
       ok: true,
       database: true,
-      providers: [...options.providers.keys()]
+      providers: [...options.providers.keys()],
+      ...(options.workspace ? { workspace: options.workspace.health() } : {})
     });
   });
 
@@ -156,6 +157,12 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     response.status(interrupted ? 202 : 404).json({ interrupted });
   });
 
+  application.get("/api/v1/generations/:generationId/inspection", (request, response) => {
+    response.json(
+      options.store.getGenerationInspection(String(request.params.generationId))
+    );
+  });
+
   application.get("/api/v1/rooms/:roomId/events", (request, response) => {
     const after = z.coerce.number().int().nonnegative().default(0)
       .parse(request.query.after);
@@ -166,6 +173,12 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     "/api/v1/rooms/:roomId/agents/:agentId/runtime",
     (request, response) => {
       const patch = z.object({ muted: z.boolean() }).parse(request.body);
+      if (patch.muted) {
+        engine.interruptAgent(
+          String(request.params.roomId),
+          String(request.params.agentId)
+        );
+      }
       const runtime = options.store.updateRuntime(
         String(request.params.roomId),
         String(request.params.agentId),
@@ -279,7 +292,11 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       return;
     }
     const message = error instanceof Error ? error.message : "Unknown error";
-    const status = /not found/i.test(message) ? 404 : /paused|already/i.test(message) ? 409 : 500;
+    const status = /not found/i.test(message)
+      ? 404
+      : /paused|already|muted|does not belong/i.test(message)
+        ? 409
+        : 500;
     response.status(status).json({ error: message });
   };
   application.use(errorHandler);
