@@ -1,0 +1,32 @@
+{
+  "name": "multi-model-writers-room",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22 <27"
+  },
+  "scripts": {
+    "build": "npm run build -w @writers-room/contracts && npm run build -w @writers-room/server && npm run build -w @writers-room/web",
+    "dev": "concurrently -k -n server,web -c cyan,magenta \"npm run dev -w @writers-room/server\" \"npm run dev -w @writers-room/web\"",
+    "lint": "npm run typecheck",
+    "start": "npm run start -w @writers-room/server",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p packages/contracts/tsconfig.json --noEmit && tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "concurrently": "^9.2.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0",
+    "sharp": "0.35.3"
+  }
+}
