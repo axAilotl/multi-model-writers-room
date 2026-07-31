@@ -13,6 +13,52 @@ const request: NormalizedChatRequest = {
 };
 
 describe("OpenAI-compatible provider seam", () => {
+  it("normalizes model-catalog input modalities and supported parameters", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({
+        data: [
+          {
+            id: "example/vision-model",
+            name: "Vision Model",
+            context_length: 128_000,
+            architecture: {
+              input_modalities: ["text", "image", "file"]
+            },
+            supported_parameters: [
+              "tools",
+              "reasoning",
+              "structured_outputs",
+              "prompt_cache_key"
+            ]
+          }
+        ]
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    ));
+    const provider = new OpenAiCompatibleProvider({
+      id: "generic",
+      baseUrl: "http://model.test/v1",
+      fetcher
+    });
+
+    await expect(provider.listModels()).resolves.toMatchObject([
+      {
+        id: "example/vision-model",
+        capabilities: {
+          contextLength: 128_000,
+          textInput: true,
+          imageInput: true,
+          pdfInput: true,
+          toolCalling: true,
+          structuredOutput: true,
+          reasoningInputControl: true,
+          reasoningOutput: true,
+          promptCaching: true
+        }
+      }
+    ]);
+  });
+
   it("normalizes streamed reasoning, text, routing, usage, and completion", async () => {
     const body = [
       'data: {"model":"routed/model","provider":"Together","choices":[{"delta":{"reasoning":"Think ","content":""}}]}',

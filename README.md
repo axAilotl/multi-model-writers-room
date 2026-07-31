@@ -9,6 +9,7 @@ final synthesis.
 ## What works
 
 - Three to five OpenRouter, Ollama, or OpenAI-compatible participants
+- Live provider-backed model catalogs with searchable OpenRouter selection
 - Manual speaker invitation and bounded automatic parallel response waves
 - Streaming text, provider-returned reasoning, usage, routing, and interruption
 - Durable SQLite transcript, runtime state, generation events, and restart
@@ -19,6 +20,8 @@ final synthesis.
 - In-process local ONNX embeddings and artifact summaries isolated in a worker
   thread
 - A three-panel React room interface
+- A settings page for room pacing, provider inspection, and reusable voice
+  templates
 
 The release intentionally omits arbitrary transcript editing, branching,
 private notebooks, authentication, code mutation, repository/shell tools, and

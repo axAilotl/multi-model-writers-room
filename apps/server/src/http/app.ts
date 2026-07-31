@@ -4,7 +4,8 @@ import multer from "multer";
 import { z } from "zod";
 import {
   agentDefinitionSchema,
-  roomSettingsSchema
+  roomSettingsSchema,
+  voiceTemplateInputSchema
 } from "@writers-room/contracts";
 import type { ModelProvider } from "../providers/model-provider.js";
 import { RoomEngine } from "../room/room-engine.js";
@@ -37,6 +38,10 @@ const speakerSchema = z.object({
   targetMessageId: z.string().optional()
 });
 
+const voiceTemplatePatchSchema = voiceTemplateInputSchema
+  .partial()
+  .refine(value => Object.keys(value).length > 0, "At least one field is required");
+
 function asyncRoute(
   handler: (request: express.Request, response: express.Response) => Promise<void>
 ): express.RequestHandler {
@@ -68,6 +73,50 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       providers: [...options.providers.keys()],
       ...(options.workspace ? { workspace: options.workspace.health() } : {})
     });
+  });
+
+  application.get(
+    "/api/v1/providers/:providerId/models",
+    asyncRoute(async (request, response) => {
+      const providerId = String(request.params.providerId);
+      const provider = options.providers.get(providerId);
+      if (!provider) throw new Error(`Provider not found: ${providerId}`);
+      const models = await provider.listModels();
+      response.json({
+        provider: providerId,
+        models: [...models].sort((left, right) =>
+          left.name.localeCompare(right.name)
+        )
+      });
+    })
+  );
+
+  application.get("/api/v1/voice-templates", (_request, response) => {
+    response.json({ templates: options.store.listVoiceTemplates() });
+  });
+
+  application.post("/api/v1/voice-templates", (request, response) => {
+    const input = voiceTemplateInputSchema.parse(request.body);
+    response.status(201).json({
+      template: options.store.createVoiceTemplate(input)
+    });
+  });
+
+  application.patch("/api/v1/voice-templates/:templateId", (request, response) => {
+    const patch = voiceTemplatePatchSchema.parse(request.body);
+    response.json({
+      template: options.store.updateVoiceTemplate(
+        String(request.params.templateId),
+        patch
+      )
+    });
+  });
+
+  application.delete("/api/v1/voice-templates/:templateId", (request, response) => {
+    const template = options.store.deleteVoiceTemplate(
+      String(request.params.templateId)
+    );
+    response.json({ deleted: true, template });
   });
 
   application.get("/api/v1/rooms", (_request, response) => {

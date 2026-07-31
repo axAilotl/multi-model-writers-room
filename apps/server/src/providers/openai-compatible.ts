@@ -45,14 +45,16 @@ interface StreamDelta {
 
 function capabilitiesFromParameters(
   contextLength: number,
-  parameters: readonly string[]
+  parameters: readonly string[],
+  inputModalities: readonly string[] = ["text"]
 ): ModelCapabilities {
   const supported = new Set(parameters);
+  const inputs = new Set(inputModalities);
   return {
     contextLength,
-    textInput: true,
-    imageInput: supported.has("images"),
-    pdfInput: supported.has("file"),
+    textInput: inputs.has("text"),
+    imageInput: inputs.has("image") || supported.has("images"),
+    pdfInput: inputs.has("file") || supported.has("file"),
     toolCalling: supported.has("tools"),
     structuredOutput: supported.has("structured_outputs") || supported.has("response_format"),
     reasoningInputControl: supported.has("reasoning"),
@@ -241,6 +243,9 @@ export class OpenAiCompatibleProvider implements ModelProvider {
         name?: string;
         context_length?: number;
         supported_parameters?: string[];
+        architecture?: {
+          input_modalities?: string[];
+        };
       }>;
     };
     return (payload.data ?? []).map(model => ({
@@ -248,7 +253,8 @@ export class OpenAiCompatibleProvider implements ModelProvider {
       name: model.name ?? model.id,
       capabilities: this.overrides[model.id] ?? capabilitiesFromParameters(
         model.context_length ?? 32_768,
-        model.supported_parameters ?? []
+        model.supported_parameters ?? [],
+        model.architecture?.input_modalities ?? ["text"]
       )
     }));
   }

@@ -1,14 +1,11 @@
 import type {
   ModelCapabilities,
+  ModelDescriptor,
   NormalizedChatRequest,
   NormalizedGenerationEvent
 } from "@writers-room/contracts";
 
-export interface ModelDescriptor {
-  id: string;
-  name: string;
-  capabilities: ModelCapabilities;
-}
+export type { ModelDescriptor } from "@writers-room/contracts";
 
 export interface ModelProvider {
   readonly id: string;
@@ -18,4 +15,3 @@ export interface ModelProvider {
     request: NormalizedChatRequest
   ): AsyncIterable<NormalizedGenerationEvent>;
 }
-

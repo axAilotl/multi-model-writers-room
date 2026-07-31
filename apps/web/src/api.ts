@@ -1,8 +1,11 @@
 import type {
   AgentDefinition,
+  ModelDescriptor,
   Room,
   RoomSettings,
   RoomSnapshot,
+  VoiceTemplate,
+  VoiceTemplateInput,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
 
@@ -23,6 +26,52 @@ async function requestJson<Result>(
 }
 
 export const api = {
+  health(): Promise<{
+    ok: boolean;
+    database: boolean;
+    providers: AgentDefinition["provider"][];
+    workspace?: { vectorExtensionAvailable: boolean };
+  }> {
+    return requestJson("/api/v1/health");
+  },
+
+  async listProviderModels(provider: AgentDefinition["provider"]): Promise<ModelDescriptor[]> {
+    return (await requestJson<{
+      provider: AgentDefinition["provider"];
+      models: ModelDescriptor[];
+    }>(`/api/v1/providers/${encodeURIComponent(provider)}/models`)).models;
+  },
+
+  async listVoiceTemplates(): Promise<VoiceTemplate[]> {
+    return (await requestJson<{ templates: VoiceTemplate[] }>(
+      "/api/v1/voice-templates"
+    )).templates;
+  },
+
+  async createVoiceTemplate(input: VoiceTemplateInput): Promise<VoiceTemplate> {
+    return (await requestJson<{ template: VoiceTemplate }>(
+      "/api/v1/voice-templates",
+      { method: "POST", body: JSON.stringify(input) }
+    )).template;
+  },
+
+  async updateVoiceTemplate(
+    templateId: string,
+    patch: Partial<VoiceTemplateInput>
+  ): Promise<VoiceTemplate> {
+    return (await requestJson<{ template: VoiceTemplate }>(
+      `/api/v1/voice-templates/${encodeURIComponent(templateId)}`,
+      { method: "PATCH", body: JSON.stringify(patch) }
+    )).template;
+  },
+
+  async deleteVoiceTemplate(templateId: string): Promise<void> {
+    await requestJson(
+      `/api/v1/voice-templates/${encodeURIComponent(templateId)}`,
+      { method: "DELETE" }
+    );
+  },
+
   async listRooms(): Promise<Room[]> {
     return (await requestJson<{ rooms: Room[] }>("/api/v1/rooms")).rooms;
   },

@@ -11,6 +11,8 @@ import {
   roomSchema,
   roomSettingsSchema,
   sharedNoteSchema,
+  voiceTemplateInputSchema,
+  voiceTemplateSchema,
   type AgentDefinition,
   type AgentRuntimeState,
   type GenerationRecord,
@@ -21,6 +23,8 @@ import {
   type RoomStreamEvent,
   type RoomStreamEventInput,
   type SharedNote,
+  type VoiceTemplate,
+  type VoiceTemplateInput,
   type WorkspaceArtifact
 } from "@writers-room/contracts";
 import { uuidv7 } from "../shared/id.js";
@@ -56,6 +60,10 @@ interface JsonRow {
 
 type RoomSettingsPatch = {
   [Key in keyof RoomSettings]?: RoomSettings[Key] | undefined;
+};
+
+type VoiceTemplatePatch = {
+  [Key in keyof VoiceTemplateInput]?: VoiceTemplateInput[Key] | undefined;
 };
 
 export class RoomStore {
@@ -217,6 +225,67 @@ export class RoomStore {
     `).all(roomId).map(row =>
       agentDefinitionSchema.parse(JSON.parse((row as JsonRow).payload_json))
     );
+  }
+
+  createVoiceTemplate(input: VoiceTemplateInput): VoiceTemplate {
+    const now = new Date().toISOString();
+    const template = voiceTemplateSchema.parse({
+      ...voiceTemplateInputSchema.parse(input),
+      id: uuidv7(),
+      createdAt: now,
+      updatedAt: now
+    });
+    this.database.prepare(`
+      INSERT INTO voice_templates(id, payload_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+    `).run(template.id, JSON.stringify(template), now, now);
+    return template;
+  }
+
+  listVoiceTemplates(): VoiceTemplate[] {
+    return this.database.prepare(`
+      SELECT payload_json FROM voice_templates ORDER BY updated_at DESC
+    `).all().map(row =>
+      voiceTemplateSchema.parse(JSON.parse((row as JsonRow).payload_json))
+    );
+  }
+
+  getVoiceTemplate(templateId: string): VoiceTemplate {
+    const row = this.database.prepare(
+      "SELECT payload_json FROM voice_templates WHERE id = ?"
+    ).get(templateId) as JsonRow | undefined;
+    if (!row) throw new Error(`Voice template not found: ${templateId}`);
+    return voiceTemplateSchema.parse(JSON.parse(row.payload_json));
+  }
+
+  updateVoiceTemplate(
+    templateId: string,
+    patch: VoiceTemplatePatch
+  ): VoiceTemplate {
+    const current = this.getVoiceTemplate(templateId);
+    const updatedAt = new Date().toISOString();
+    const template = voiceTemplateSchema.parse({
+      ...current,
+      ...voiceTemplateInputSchema.parse({
+        ...current,
+        ...patch
+      }),
+      updatedAt
+    });
+    this.database.prepare(`
+      UPDATE voice_templates
+      SET payload_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(JSON.stringify(template), updatedAt, templateId);
+    return template;
+  }
+
+  deleteVoiceTemplate(templateId: string): VoiceTemplate {
+    const template = this.getVoiceTemplate(templateId);
+    this.database.prepare(
+      "DELETE FROM voice_templates WHERE id = ?"
+    ).run(templateId);
+    return template;
   }
 
   getRuntime(roomId: string, agentId: string): AgentRuntimeState {

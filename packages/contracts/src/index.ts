@@ -36,6 +36,12 @@ export const modelCapabilitiesSchema = z.object({
 });
 export type ModelCapabilities = z.infer<typeof modelCapabilitiesSchema>;
 
+export interface ModelDescriptor {
+  id: string;
+  name: string;
+  capabilities: ModelCapabilities;
+}
+
 export const contextBudgetSchema = z.object({
   softLimitTokens: z.number().int().positive(),
   hardLimitTokens: z.number().int().positive(),
@@ -65,6 +71,20 @@ export const agentDefinitionSchema = z.object({
   capabilities: modelCapabilitiesSchema.optional()
 });
 export type AgentDefinition = z.infer<typeof agentDefinitionSchema>;
+
+export const voiceTemplateInputSchema = agentDefinitionSchema
+  .omit({ id: true, capabilities: true })
+  .extend({
+    title: z.string().trim().min(1).max(120)
+  });
+export type VoiceTemplateInput = z.infer<typeof voiceTemplateInputSchema>;
+
+export const voiceTemplateSchema = voiceTemplateInputSchema.extend({
+  id: z.string().min(1),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type VoiceTemplate = z.infer<typeof voiceTemplateSchema>;
 
 export const roomSettingsSchema = z.object({
   autoMode: z.boolean().default(true),

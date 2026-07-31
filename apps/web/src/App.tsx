@@ -16,6 +16,7 @@ import {
   RotateCcw,
   Search,
   Send,
+  Settings as SettingsIcon,
   Sparkles,
   Upload,
   Users,
@@ -35,13 +36,23 @@ import {
 import type {
   AgentDefinition,
   GenerationRecord,
+  ModelCapabilities,
   Room,
   RoomMessage,
   RoomSnapshot,
+  VoiceTemplate,
+  VoiceTemplateInput,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
-import { defaultRoomToolNames } from "@writers-room/contracts";
 import { api } from "./api.js";
+import {
+  ModelPicker,
+  SettingsPage
+} from "./voice-settings.js";
+import {
+  blankVoiceTemplate,
+  voiceTemplateInput
+} from "./voice-template.js";
 
 const participantColors = ["#c96c47", "#637d68", "#7566a3", "#b08a3f", "#477b8f"];
 
@@ -335,39 +346,62 @@ function AddAgent({ roomId, onAdded, onClose }: {
   onAdded: () => void;
   onClose: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [model, setModel] = useState("anthropic/claude-sonnet-4");
-  const [provider, setProvider] = useState<AgentDefinition["provider"]>("openrouter");
-  const [description, setDescription] = useState("");
-  const [prompt, setPrompt] = useState("Advance the discussion from your distinct expertise.");
+  const [draft, setDraft] = useState<VoiceTemplateInput>(blankVoiceTemplate);
+  const [templates, setTemplates] = useState<VoiceTemplate[]>([]);
+  const [templateId, setTemplateId] = useState("");
+  const [capabilities, setCapabilities] = useState<ModelCapabilities>();
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.listVoiceTemplates()
+      .then(nextTemplates => {
+        if (!cancelled) setTemplates(nextTemplates);
+      })
+      .catch(errorValue => {
+        if (!cancelled) {
+          setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function update<Key extends keyof VoiceTemplateInput>(
+    key: Key,
+    value: VoiceTemplateInput[Key]
+  ) {
+    setDraft(current => ({ ...current, [key]: value }));
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
+    setError(undefined);
     try {
-      const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${Date.now().toString(36)}`;
+      const id = `${draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${Date.now().toString(36)}`;
       await api.addAgent(roomId, {
         id,
-        name,
-        description,
-        provider,
-        modelId: model,
-        systemPrompt: prompt,
-        temperature: 0.7,
-        maxOutputTokens: 1_200,
-        reasoning: { enabled: true, effort: "medium", displayMode: "summary" },
-        tools: [...defaultRoomToolNames],
-        contextBudget: {
-          softLimitTokens: 120_000,
-          hardLimitTokens: 160_000,
-          recentTranscriptTokens: 70_000,
-          retrievedContextTokens: 24_000,
-          notebookTokens: 0
-        }
+        name: draft.name,
+        description: draft.description,
+        provider: draft.provider,
+        modelId: draft.modelId,
+        systemPrompt: draft.systemPrompt,
+        ...(draft.personaPrompt ? { personaPrompt: draft.personaPrompt } : {}),
+        temperature: draft.temperature,
+        ...(draft.topP === undefined ? {} : { topP: draft.topP }),
+        maxOutputTokens: draft.maxOutputTokens,
+        reasoning: draft.reasoning,
+        tools: [...draft.tools],
+        contextBudget: { ...draft.contextBudget },
+        ...(capabilities === undefined ? {} : { capabilities })
       });
       onAdded();
       onClose();
+    } catch (errorValue) {
+      setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
     } finally {
       setSaving(false);
     }
@@ -382,22 +416,87 @@ function AddAgent({ roomId, onAdded, onClose }: {
           <div><Bot size={18} /> Add a voice</div>
           <button type="button" className="icon-button" onClick={onClose}><X size={16} /></button>
         </header>
-        <label>Name<input required value={name} onChange={event => setName(event.target.value)} placeholder="Systems Engineer" /></label>
-        <label>Point of view<input value={description} onChange={event => setDescription(event.target.value)} placeholder="Finds durable seams and failure modes." /></label>
+        <label>Voice template
+          <select
+            name="voiceTemplate"
+            value={templateId}
+            onChange={event => {
+              const nextId = event.target.value;
+              setTemplateId(nextId);
+              const template = templates.find(item => item.id === nextId);
+              if (template) setDraft(voiceTemplateInput(template));
+            }}
+          >
+            <option value="">Start with a blank voice</option>
+            {templates.map(template => (
+              <option value={template.id} key={template.id}>
+                {template.title} · {template.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>Name
+          <input
+            name="voiceName"
+            required
+            value={draft.name}
+            onChange={event => update("name", event.target.value)}
+            placeholder="Systems Engineer"
+          />
+        </label>
+        <label>Point of view
+          <input
+            value={draft.description}
+            onChange={event => update("description", event.target.value)}
+            placeholder="Finds durable seams and failure modes."
+          />
+        </label>
         <div className="field-row">
           <label>Provider
-            <select value={provider} onChange={event => setProvider(event.target.value as AgentDefinition["provider"])}>
+            <select
+              value={draft.provider}
+              onChange={event => update(
+                "provider",
+                event.target.value as AgentDefinition["provider"]
+              )}
+            >
               <option value="openrouter">OpenRouter</option>
               <option value="ollama">Ollama</option>
               <option value="openai-compatible">OpenAI-compatible</option>
             </select>
           </label>
-          <label>Model<input required value={model} onChange={event => setModel(event.target.value)} /></label>
+          <label>Model
+            <ModelPicker
+              provider={draft.provider}
+              value={draft.modelId}
+              onChange={modelId => update("modelId", modelId)}
+              onCapabilities={setCapabilities}
+            />
+          </label>
         </div>
-        <label>System prompt<textarea value={prompt} onChange={event => setPrompt(event.target.value)} rows={4} /></label>
+        <label>System prompt
+          <textarea
+            name="systemPrompt"
+            value={draft.systemPrompt}
+            onChange={event => update("systemPrompt", event.target.value)}
+            rows={4}
+          />
+        </label>
+        <label>Persona prompt
+          <textarea
+            value={draft.personaPrompt ?? ""}
+            onChange={event => update("personaPrompt", event.target.value)}
+            rows={2}
+            placeholder="Short stylistic direction for this voice."
+          />
+        </label>
+        {error && <div className="settings-error">{error}</div>}
         <footer>
           <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" disabled={saving || !name.trim()}>
+          <button
+            className="primary-button"
+            disabled={saving || !draft.name.trim() || !draft.modelId}
+          >
             {saving ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />}
             Add participant
           </button>
@@ -416,7 +515,9 @@ function ParticipantsPanel({ snapshot, onChanged, onAdd }: {
     <aside className="right-panel">
       <div className="panel-title">
         <span><Users size={16} /> In the room</span>
-        <button className="icon-button" onClick={onAdd}><Plus size={15} /></button>
+        <button className="icon-button" onClick={onAdd} aria-label="Add voice">
+          <Plus size={15} />
+        </button>
       </div>
       <div className="participant-list">
         {snapshot.agents.length === 0 && (
@@ -509,6 +610,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [showAgent, setShowAgent] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const refresh = useCallback(async (selectedRoomId?: string) => {
     const id = selectedRoomId ?? roomId;
@@ -588,6 +690,14 @@ export default function App() {
           <span className={`room-status ${snapshot.room.status}`} />
         </div>
         <div className="top-controls">
+          <button
+            className="top-icon-button"
+            onClick={() => setShowSettings(true)}
+            aria-label="Open settings"
+            title="Settings"
+          >
+            <SettingsIcon size={15} />
+          </button>
           <label className="toggle-label">
             Auto
             <button
@@ -686,6 +796,15 @@ export default function App() {
           roomId={snapshot.room.id}
           onAdded={() => void refresh(roomId)}
           onClose={() => setShowAgent(false)}
+        />
+      )}
+      {showSettings && (
+        <SettingsPage
+          room={snapshot.room}
+          onRoomChanged={room => {
+            setSnapshot(current => current ? { ...current, room } : current);
+          }}
+          onClose={() => setShowSettings(false)}
         />
       )}
       {error && (

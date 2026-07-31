@@ -174,6 +174,17 @@ const migrations: ReadonlyArray<(database: Database.Database) => void> = [
         updated_at TEXT NOT NULL
       );
     `);
+  },
+  database => {
+    database.exec(`
+      CREATE TABLE voice_templates (
+        id TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX voice_templates_updated ON voice_templates(updated_at DESC);
+    `);
   }
 ];
 
@@ -199,4 +210,3 @@ export function migrate(database: Database.Database): void {
     })();
   });
 }
-
