@@ -15,7 +15,8 @@ import { RoomToolExecutor } from "./tools/room-tools.js";
 import {
   WorkspaceService,
   type EmbeddingModel,
-  type HousekeepingModel
+  type HousekeepingModel,
+  extractiveHousekeepingModel
 } from "./workspace/workspace-service.js";
 
 export interface WritersRoomRuntime {
@@ -120,7 +121,7 @@ export async function startRuntime(input?: {
     store,
     dataRoot,
     embeddings: input?.workspaceModels?.embeddings ?? localModels,
-    housekeeping: input?.workspaceModels?.housekeeping ?? localModels
+    housekeeping: input?.workspaceModels?.housekeeping ?? extractiveHousekeepingModel
   });
   const tools = new RoomToolExecutor(store, workspace);
   const app = createHttpApplication({
@@ -161,6 +162,7 @@ export async function startRuntime(input?: {
         server.close(error => error ? reject(error) : resolveClose());
       });
       await localModels.close();
+      await workspace.waitForEnrichment();
       store.close();
     }
   };

@@ -37,6 +37,108 @@ const housekeeping: HousekeepingModel = {
 };
 
 describe("shared workspace seam", () => {
+  it("publishes extracted Markdown before optional model enrichment finishes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-fast-markdown-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Fast Markdown room" });
+    let releaseModels!: () => void;
+    const modelsBlocked = new Promise<void>(resolve => {
+      releaseModels = resolve;
+    });
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: {
+        dimensions: 2,
+        embedDocuments: async texts => {
+          await modelsBlocked;
+          return texts.map(() => new Float32Array([1, 0]));
+        },
+        embedQuery: async () => new Float32Array([1, 0])
+      },
+      housekeeping: {
+        summarize: async input => {
+          await modelsBlocked;
+          return { summary: `${input.filename} enriched summary.` };
+        }
+      }
+    });
+    const ingestion = workspace.ingest({
+      roomId: room.id,
+      filename: "quick.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("# Fast path\n\nLexical evidence is immediately useful.")
+    });
+
+    const earlyArtifact = await Promise.race([
+      ingestion,
+      new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 100))
+    ]);
+    releaseModels();
+    const artifact = await ingestion;
+
+    expect(earlyArtifact).toMatchObject({
+      id: artifact.id,
+      ingestionStatus: "ready",
+      ingestionStage: "ready_lexical"
+    });
+    expect(workspace.findExact({
+      roomId: room.id,
+      query: "immediately useful"
+    })).toHaveLength(1);
+    await workspace.waitForEnrichment();
+    store.close();
+  });
+
+  it("makes interrupted processing artifacts retryable after restart", () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-ingestion-recovery-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Recovery room" });
+    const now = new Date().toISOString();
+    const interrupted = {
+      id: "interrupted-artifact",
+      roomId: room.id,
+      filename: "stuck.md",
+      mediaType: "text/markdown",
+      sha256: "a".repeat(64),
+      byteSize: 12,
+      sourceType: "upload",
+      summary: "Queued for ingestion.",
+      ingestionStatus: "processing",
+      ingestionStage: "extracting",
+      createdAt: now,
+      updatedAt: now
+    };
+    store.database.prepare(`
+      INSERT INTO artifacts(id, room_id, sha256, payload_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      interrupted.id,
+      room.id,
+      interrupted.sha256,
+      JSON.stringify(interrupted),
+      now,
+      now
+    );
+
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: new FixtureEmbeddingModel(),
+      housekeeping
+    });
+
+    expect(workspace.listArtifacts(room.id)[0]).toMatchObject({
+      id: interrupted.id,
+      ingestionStatus: "failed",
+      ingestionStage: "failed",
+      error: expect.stringMatching(/interrupted.*retry/i)
+    });
+    store.close();
+  });
+
   it("deduplicates Markdown, preserves structure, and returns stable fused citations", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-workspace-"));
     roots.push(root);
@@ -70,6 +172,8 @@ describe("shared workspace seam", () => {
       mediaType: "text/markdown",
       bytes
     });
+    await workspace.waitForEnrichment();
+    const enriched = workspace.listArtifacts(room.id)[0]!;
     const results = await workspace.search({
       roomId: room.id,
       query: "persistent table",
@@ -77,7 +181,7 @@ describe("shared workspace seam", () => {
     });
 
     expect(duplicate.id).toBe(first.id);
-    expect(first).toMatchObject({
+    expect(enriched).toMatchObject({
       ingestionStatus: "ready",
       summary: "roadmap.md describes a persistent shared table."
     });

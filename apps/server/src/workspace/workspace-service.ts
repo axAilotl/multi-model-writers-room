@@ -31,6 +31,22 @@ export interface HousekeepingModel {
   }): Promise<{ summary: string; outline?: string }>;
 }
 
+function extractiveSummary(chunks: ArtifactChunk[]): {
+  summary: string;
+  outline?: string;
+} {
+  const summary = chunks[0]!.text.replace(/\s+/g, " ").slice(0, 320);
+  const outline = chunks.map(chunk => chunk.headingPath).filter(Boolean).join("; ");
+  return {
+    summary,
+    ...(outline ? { outline } : {})
+  };
+}
+
+export const extractiveHousekeepingModel: HousekeepingModel = {
+  summarize: async input => extractiveSummary(input.chunks)
+};
+
 interface WorkspaceServiceOptions {
   store: RoomStore;
   dataRoot: string;
@@ -41,11 +57,13 @@ interface WorkspaceServiceOptions {
 export class WorkspaceService {
   private readonly repository: WorkspaceRepository;
   private readonly blobsRoot: string;
+  private readonly enrichmentJobs = new Set<Promise<void>>();
 
   constructor(private readonly options: WorkspaceServiceOptions) {
     this.repository = new WorkspaceRepository(options.store);
     this.blobsRoot = join(options.dataRoot, "blobs");
     mkdirSync(this.blobsRoot, { recursive: true });
+    this.reconcileInterruptedArtifacts();
   }
 
   async ingest(input: {
@@ -83,39 +101,14 @@ export class WorkspaceService {
       const chunks = await this.parse(input.mediaType, input.filename, input.bytes);
       if (chunks.length === 0) throw new Error("No text could be extracted");
       this.repository.replaceChunks(artifact.id, chunks);
-      let semanticError: string | undefined;
-      try {
-        const embeddings = await this.options.embeddings.embedDocuments(
-          chunks.map(chunk => `search_document: ${chunk.text}`)
-        );
-        this.repository.updateEmbeddings(chunks, embeddings);
-      } catch (error) {
-        semanticError = error instanceof Error ? error.message : String(error);
-      }
-      let summary: { summary: string; outline?: string };
-      try {
-        summary = await this.options.housekeeping.summarize({
-          filename: input.filename,
-          chunks: chunks.slice(0, 20).map(chunk => ({
-            ...chunk,
-            artifactId: artifact.id
-          }))
-        });
-      } catch {
-        summary = {
-          summary: chunks[0]!.text.replace(/\s+/g, " ").slice(0, 320),
-          outline: chunks.map(chunk => chunk.headingPath).filter(Boolean).join("; ")
-        };
-      }
+      const summary = extractiveSummary(chunks);
       artifact = this.repository.updateArtifact(artifact.id, {
         summary: summary.summary,
         ...(summary.outline ? { outline: summary.outline } : {}),
         ingestionStatus: "ready",
-        ingestionStage: semanticError ? "ready_lexical" : "ready",
-        ...(semanticError === undefined
-          ? {}
-          : { error: `Semantic indexing unavailable: ${semanticError}` })
+        ingestionStage: "ready_lexical"
       });
+      this.startEnrichment(artifact, chunks);
       return artifact;
     } catch (error) {
       this.repository.updateArtifact(artifact.id, {
@@ -129,6 +122,10 @@ export class WorkspaceService {
 
   listArtifacts(roomId: string): WorkspaceArtifact[] {
     return this.repository.listArtifacts(roomId);
+  }
+
+  async waitForEnrichment(): Promise<void> {
+    await Promise.allSettled([...this.enrichmentJobs]);
   }
 
   async retryArtifact(roomId: string, artifactId: string): Promise<WorkspaceArtifact> {
@@ -294,5 +291,90 @@ export class WorkspaceService {
   private blobPath(sha256: string): string {
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error("Invalid workspace blob hash");
     return join(this.blobsRoot, sha256.slice(0, 2), sha256);
+  }
+
+  private startEnrichment(
+    artifact: WorkspaceArtifact,
+    chunks: ArtifactChunk[]
+  ): void {
+    const job = this.enrichArtifact(artifact, chunks)
+      .catch(error => {
+        try {
+          this.repository.updateArtifact(artifact.id, {
+            ingestionStage: "ready_lexical",
+            error: `Semantic enrichment unavailable: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          });
+        } catch {
+          // The artifact or room was deleted while enrichment was running.
+        }
+      })
+      .finally(() => {
+        this.enrichmentJobs.delete(job);
+      });
+    this.enrichmentJobs.add(job);
+  }
+
+  private async enrichArtifact(
+    artifact: WorkspaceArtifact,
+    chunks: ArtifactChunk[]
+  ): Promise<void> {
+    const enrichmentChunks = chunks.slice(0, 20).map(chunk => ({
+      ...chunk,
+      artifactId: artifact.id
+    }));
+    const [embeddingResult, summaryResult] = await Promise.allSettled([
+      this.options.embeddings.embedDocuments(
+        chunks.map(chunk => `search_document: ${chunk.text}`)
+      ),
+      this.options.housekeeping.summarize({
+        filename: artifact.filename,
+        chunks: enrichmentChunks
+      })
+    ]);
+    try {
+      this.repository.getArtifact(artifact.id);
+    } catch {
+      return;
+    }
+    if (embeddingResult.status === "fulfilled") {
+      this.repository.updateEmbeddings(chunks, embeddingResult.value);
+    }
+    const errors = [
+      ...(embeddingResult.status === "rejected"
+        ? [`Semantic indexing unavailable: ${String(embeddingResult.reason)}`]
+        : []),
+      ...(summaryResult.status === "rejected"
+        ? [`Summary enrichment unavailable: ${String(summaryResult.reason)}`]
+        : [])
+    ];
+    this.repository.updateArtifact(artifact.id, {
+      ...(summaryResult.status === "fulfilled"
+        ? {
+            summary: summaryResult.value.summary,
+            ...(summaryResult.value.outline
+              ? { outline: summaryResult.value.outline }
+              : {})
+          }
+        : {}),
+      ingestionStage: embeddingResult.status === "fulfilled"
+        ? "ready"
+        : "ready_lexical",
+      ...(errors.length > 0 ? { error: errors.join("; ") } : { error: undefined })
+    });
+  }
+
+  private reconcileInterruptedArtifacts(): void {
+    for (const room of this.options.store.listRooms()) {
+      for (const artifact of this.repository.listArtifacts(room.id)) {
+        if (artifact.ingestionStatus !== "processing") continue;
+        this.repository.updateArtifact(artifact.id, {
+          ingestionStatus: "failed",
+          ingestionStage: "failed",
+          error: "Ingestion was interrupted. Retry to process the stored original."
+        });
+      }
+    }
   }
 }
