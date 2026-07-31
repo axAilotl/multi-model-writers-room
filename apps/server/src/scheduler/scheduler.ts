@@ -101,17 +101,25 @@ export class ConversationScheduler {
       }
       const trigger = snapshot.messages.find(message => message.id === triggerMessageId);
       if (!trigger) throw new Error(`Trigger message not found: ${triggerMessageId}`);
+      const remainingReplies = snapshot.room.settings.maxAutonomousReplies - replies;
+      if (remainingReplies <= 0) {
+        return { waves, replies, stopReason: "reply_cap" };
+      }
       const mentioned = new Set(trigger.mentionedAgentIds);
       const pressure = assessRoomPressure(snapshot.messages, this.now());
       if (pressure.hardSuppressed && mentioned.size === 0) {
         return { waves, replies, stopReason: "pressure" };
       }
       const candidates = await Promise.all(snapshot.agents.map(async agent => {
+        const storedRuntime = this.dependencies.store.getRuntime(roomId, agent.id);
         const runtime = recoverIdle({
-          runtime: this.dependencies.store.getRuntime(roomId, agent.id),
+          runtime: storedRuntime,
           nowMs: this.now(),
           intervalMs: snapshot.room.settings.idleRecoveryIntervalMs
         });
+        if (runtime !== storedRuntime) {
+          this.dependencies.store.updateRuntime(roomId, agent.id, runtime);
+        }
         if (runtime.muted) return undefined;
         const directlyMentioned = mentioned.has(agent.id);
         if (
@@ -166,20 +174,30 @@ export class ConversationScheduler {
           right.score - left.score ||
           left.agent.id.localeCompare(right.agent.id)
         )
-        .slice(0, snapshot.room.settings.maxResponders);
+        .slice(0, Math.min(
+          snapshot.room.settings.maxResponders,
+          remainingReplies
+        ));
       if (selected.length === 0) {
         return { waves, replies, stopReason: "silence" };
       }
 
-      const outputs = await Promise.all(selected.map(candidate =>
+      const settled = await Promise.allSettled(selected.map(candidate =>
         this.dependencies.generator.generate({
           roomId,
           agentId: candidate.agent.id,
           targetMessageId: candidate.decision.targetMessageId ?? trigger.id
         })
       ));
+      const outputs = settled.flatMap(result =>
+        result.status === "fulfilled" ? [result.value] : []
+      );
+      if (outputs.length === 0) {
+        const failure = settled.find(result => result.status === "rejected");
+        throw failure?.reason ?? new Error("Every selected speaker failed");
+      }
       waves += 1;
-      replies += outputs.length;
+      replies += settled.length;
       this.applyWaveFatigue(roomId, outputs);
       triggerMessageId = outputs.at(-1)!.message.id;
 
@@ -196,10 +214,18 @@ export class ConversationScheduler {
   }
 
   private applyHumanRecovery(roomId: string): void {
-    const nowIso = new Date(this.now()).toISOString();
+    const nowMs = this.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const intervalMs = this.dependencies.store.getRoom(roomId)
+      .settings.idleRecoveryIntervalMs;
     for (const agent of this.dependencies.store.listAgents(roomId)) {
+      const idleRecovered = recoverIdle({
+        runtime: this.dependencies.store.getRuntime(roomId, agent.id),
+        nowMs,
+        intervalMs
+      });
       const recovered = recoverForHuman(
-        this.dependencies.store.getRuntime(roomId, agent.id),
+        idleRecovered,
         nowIso
       );
       this.dependencies.store.updateRuntime(roomId, agent.id, recovered);

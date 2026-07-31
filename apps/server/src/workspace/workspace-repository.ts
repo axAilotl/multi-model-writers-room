@@ -138,20 +138,33 @@ export class WorkspaceRepository {
     artifactIds: string[] | undefined,
     limit: number
   ): ArtifactChunk[] {
+    const selectedIds = artifactIds ? [...new Set(artifactIds)] : undefined;
+    if (selectedIds?.length === 0) return [];
+    const artifactFilter = selectedIds
+      ? `AND c.artifact_id IN (${selectedIds.map(() => "?").join(", ")})`
+      : "";
     const rows = this.store.database.prepare(`
       SELECT c.payload_json
       FROM artifact_chunks c
       JOIN artifacts a ON a.id = c.artifact_id
       WHERE a.room_id = ?
         AND instr(lower(c.text), lower(?)) > 0
+        ${artifactFilter}
       ORDER BY a.updated_at DESC, c.ordinal
       LIMIT ?
-    `).all(roomId, query, Math.max(limit, 50)) as JsonRow[];
-    const allowed = artifactIds ? new Set(artifactIds) : undefined;
-    return rows
-      .map(row => artifactChunkSchema.parse(JSON.parse(row.payload_json)))
-      .filter(chunk => !allowed || allowed.has(chunk.artifactId))
-      .slice(0, limit);
+    `).all(
+      roomId,
+      query,
+      ...(selectedIds ?? []),
+      limit
+    ) as JsonRow[];
+    return rows.map(row =>
+      artifactChunkSchema.parse(JSON.parse(row.payload_json))
+    );
+  }
+
+  deleteArtifact(artifactId: string): void {
+    this.store.database.prepare("DELETE FROM artifacts WHERE id = ?").run(artifactId);
   }
 
   listArtifacts(roomId: string): WorkspaceArtifact[] {

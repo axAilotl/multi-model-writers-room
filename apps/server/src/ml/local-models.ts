@@ -23,6 +23,7 @@ export class LocalModelWorker implements EmbeddingModel, HousekeepingModel {
   readonly dimensions = 512;
   private readonly worker: Worker;
   private readonly pending = new Map<string, PendingRequest>();
+  private closed = false;
 
   constructor(input: {
     dataRoot: string;
@@ -49,6 +50,17 @@ export class LocalModelWorker implements EmbeddingModel, HousekeepingModel {
       else pending.reject(new Error(reply.error ?? "Local ML worker failed"));
     });
     this.worker.on("error", error => {
+      this.closed = true;
+      for (const pending of this.pending.values()) pending.reject(error);
+      this.pending.clear();
+    });
+    this.worker.on("exit", code => {
+      this.closed = true;
+      const error = new Error(
+        code === 0
+          ? "Local ML worker closed"
+          : `Local ML worker exited with code ${code}`
+      );
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
     });
@@ -71,19 +83,31 @@ export class LocalModelWorker implements EmbeddingModel, HousekeepingModel {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.pending.values()) {
+      pending.reject(new Error("Local ML worker closed"));
+    }
+    this.pending.clear();
     await this.worker.terminate();
   }
 
   private request<Result>(
     payload: Record<string, unknown>
   ): Promise<Result> {
+    if (this.closed) return Promise.reject(new Error("Local ML worker is closed"));
     const id = uuidv7();
     return new Promise<Result>((resolve, reject) => {
       this.pending.set(id, {
         resolve: value => resolve(value as Result),
         reject
       });
-      this.worker.postMessage({ id, ...payload });
+      try {
+        this.worker.postMessage({ id, ...payload });
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 }

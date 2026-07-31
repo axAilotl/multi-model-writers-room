@@ -54,7 +54,8 @@ export class WorkspaceService {
     this.options.store.getRoom(input.roomId);
     const sha256 = createHash("sha256").update(input.bytes).digest("hex");
     const existing = this.repository.findByHash(input.roomId, sha256);
-    if (existing) return existing;
+    if (existing && existing.ingestionStatus !== "failed") return existing;
+    if (existing) this.repository.deleteArtifact(existing.id);
     const now = new Date().toISOString();
     let artifact = artifactSchema.parse({
       id: uuidv7(),

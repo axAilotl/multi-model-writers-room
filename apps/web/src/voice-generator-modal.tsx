@@ -4,9 +4,11 @@ import type {
   DefaultModelSelection,
   VoiceTemplateInput
 } from "@writers-room/contracts";
+import { voiceTemplateGenerationRequestSchema } from "@writers-room/contracts";
 import { api } from "./api.js";
 import { providerLabels } from "./provider-labels.js";
 import { useModalFocus } from "./use-modal-focus.js";
+import { validationMessage } from "./validation.js";
 
 export function VoiceGeneratorModal({
   defaultModel,
@@ -33,6 +35,11 @@ export function VoiceGeneratorModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const result = voiceTemplateGenerationRequestSchema.safeParse({ name, sourceText });
+    if (!result.success) {
+      setError(validationMessage("Cannot generate voice", result.error));
+      return;
+    }
     activeRequestRef.current?.abort();
     const controller = new AbortController();
     activeRequestRef.current = controller;
@@ -40,7 +47,7 @@ export function VoiceGeneratorModal({
     setError(undefined);
     try {
       const template = await api.generateVoiceTemplate(
-        { name, sourceText },
+        result.data,
         controller.signal
       );
       if (!controller.signal.aborted) onGenerated(template);
@@ -69,6 +76,7 @@ export function VoiceGeneratorModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="voice-generator-title"
+        noValidate
         onSubmit={submit}
       >
         <header>

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RoomStore } from "./room-store.js";
 import { createDefaultVoiceConfiguration } from "@writers-room/contracts";
 import type { AgentDefinition } from "@writers-room/contracts";
@@ -19,6 +19,30 @@ afterEach(() => {
 });
 
 describe("RoomStore public room seam", () => {
+  it("isolates event-listener failures from storage and other listeners", async () => {
+    const store = makeStore();
+    const room = store.createRoom({ title: "Listener isolation" });
+    const received: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    store.subscribeEvents(() => {
+      throw new Error("broken listener");
+    });
+    store.subscribeEvents((_roomId, event) => received.push(event.type));
+
+    expect(() => store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Keep storing this."
+    })).not.toThrow();
+    await new Promise<void>(resolve => queueMicrotask(resolve));
+
+    expect(received).toEqual(["message.created"]);
+    expect(errorSpy).toHaveBeenCalledOnce();
+    errorSpy.mockRestore();
+    store.close();
+  });
+
   it("replays durable messages and sequenced events after restart", () => {
     const first = makeStore();
     const databasePath = first.databasePath;

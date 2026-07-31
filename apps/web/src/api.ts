@@ -12,6 +12,9 @@ import type {
   WorkspaceSearchResult
 } from "@writers-room/contracts";
 
+const GENERATION_TIMEOUT_MS = 5 * 60_000;
+const INGESTION_TIMEOUT_MS = 15 * 60_000;
+
 async function requestJson<Result>(
   path: string,
   init?: RequestInit
@@ -174,7 +177,8 @@ export const api = {
   selectSpeaker(roomId: string, agentId: string): Promise<unknown> {
     return requestJson(`/api/v1/rooms/${roomId}/speakers/${agentId}`, {
       method: "POST",
-      body: JSON.stringify({})
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS)
     });
   },
 
@@ -190,7 +194,8 @@ export const api = {
     body.set("file", file);
     await requestJson(`/api/v1/rooms/${roomId}/artifacts`, {
       method: "POST",
-      body
+      body,
+      signal: AbortSignal.timeout(INGESTION_TIMEOUT_MS)
     });
   },
 
@@ -214,7 +219,8 @@ export const api = {
   regenerateTail(roomId: string): Promise<unknown> {
     return requestJson(`/api/v1/rooms/${roomId}/messages/tail/regenerate`, {
       method: "POST",
-      body: "{}"
+      body: "{}",
+      signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS)
     });
   },
 

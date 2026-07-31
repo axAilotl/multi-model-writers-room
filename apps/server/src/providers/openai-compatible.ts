@@ -170,7 +170,10 @@ async function* parseServerSentEvents(
   }
 }
 
-function deltaEvents(delta: StreamDelta): NormalizedGenerationEvent[] {
+function deltaEvents(
+  delta: StreamDelta,
+  toolCallIds: Map<number, string>
+): NormalizedGenerationEvent[] {
   const events: NormalizedGenerationEvent[] = [];
   if (delta.model || delta.provider) {
     events.push({
@@ -192,9 +195,11 @@ function deltaEvents(delta: StreamDelta): NormalizedGenerationEvent[] {
   }
   if (message?.content) events.push({ type: "text-delta", text: message.content });
   for (const call of message?.tool_calls ?? []) {
+    const index = call.index ?? 0;
+    if (call.id) toolCallIds.set(index, call.id);
     events.push({
       type: "tool-call",
-      id: call.id ?? `tool-${call.index ?? 0}`,
+      id: call.id ?? toolCallIds.get(index) ?? `tool-${index}`,
       name: call.function?.name ?? "",
       arguments: call.function?.arguments ?? ""
     });
@@ -283,8 +288,9 @@ export class OpenAiCompatibleProvider implements ModelProvider {
       ...(request.signal === undefined ? {} : { signal: request.signal })
     });
     if (!response.ok) throw await this.providerError(response);
+    const toolCallIds = new Map<number, string>();
     for await (const delta of parseServerSentEvents(response)) {
-      for (const event of deltaEvents(delta)) yield event;
+      for (const event of deltaEvents(delta, toolCallIds)) yield event;
     }
   }
 

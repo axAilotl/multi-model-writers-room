@@ -16,6 +16,19 @@ afterEach(async () => {
 });
 
 describe("runtime lifecycle", () => {
+  it("returns JSON 404 responses for unknown API routes", async () => {
+    dataRoot = await mkdtemp(join(tmpdir(), "writers-room-runtime-api-"));
+    runtime = await startRuntime({ dataRoot, host: "127.0.0.1", port: 0 });
+    const address = runtime.address();
+    const response = await fetch(
+      `http://127.0.0.1:${address!.port}/api/v1/definitely-missing`
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toEqual({ error: "API route not found" });
+  });
+
   it("closes promptly while a room WebSocket is connected", async () => {
     dataRoot = await mkdtemp(join(tmpdir(), "writers-room-runtime-"));
     runtime = await startRuntime({ dataRoot, host: "127.0.0.1", port: 0 });
@@ -41,6 +54,8 @@ describe("runtime lifecycle", () => {
           );
         })
       ]);
+      await expect(runtime.localModels.embedQuery("after close"))
+        .rejects.toThrow(/closed/);
       runtime = undefined;
     } finally {
       if (timeout) clearTimeout(timeout);

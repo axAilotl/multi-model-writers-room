@@ -120,6 +120,9 @@ export async function startRuntime(input?: {
     workspace,
     tools
   });
+  app.all("/api/*splat", (_request, response) => {
+    response.status(404).json({ error: "API route not found" });
+  });
   const webDist = resolve(process.cwd(), "apps/web/dist");
   if (existsSync(webDist)) {
     app.use(express.static(webDist));

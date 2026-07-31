@@ -181,4 +181,108 @@ describe("conversation scheduler seam", () => {
     expect(spoken).toEqual(["alpha"]);
     store.close();
   });
+
+  it("never launches more speakers than the remaining autonomous reply budget", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-reply-cap-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({
+      title: "Reply cap room",
+      settings: {
+        maxResponders: 3,
+        maxAutonomousWaves: 3,
+        maxAutonomousReplies: 1
+      }
+    });
+    for (const id of ["alpha", "beta", "gamma"]) store.addAgent(room.id, agent(id));
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Only one response is allowed."
+    });
+    const evaluator: ActivationEvaluator = {
+      evaluate: async () => ({
+        shouldRespond: true,
+        urgency: 1,
+        confidence: 1
+      })
+    };
+    const spoken: string[] = [];
+    const generator: SpeakerGenerator = {
+      generate: async input => {
+        spoken.push(input.agentId);
+        const message = store.appendMessage({
+          roomId: input.roomId,
+          authorType: "agent",
+          authorId: input.agentId,
+          content: "One bounded reply."
+        });
+        return {
+          message,
+          generation: {
+            id: `generation-${input.agentId}`,
+            roomId: input.roomId,
+            messageId: message.id,
+            agentId: input.agentId,
+            provider: "openrouter",
+            requestedModelId: "fixture",
+            status: "complete",
+            finalText: message.content,
+            retrievedChunkIds: [],
+            startedAt: new Date().toISOString()
+          }
+        };
+      }
+    };
+    const scheduler = new ConversationScheduler({ store, evaluator, generator });
+
+    const result = await scheduler.runFromHumanMessage(room.id, human.id);
+
+    expect(result).toMatchObject({ replies: 1, stopReason: "reply_cap" });
+    expect(spoken).toHaveLength(1);
+    store.close();
+  });
+
+  it("applies idle recovery before human recovery", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-idle-recovery-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const now = Date.parse("2026-07-31T14:00:00.000Z");
+    const room = store.createRoom({ title: "Idle recovery room" });
+    store.addAgent(room.id, agent("alpha"));
+    store.updateRuntime(room.id, "alpha", {
+      fatigue: 0.8,
+      lastEvaluatedAt: new Date(now - 30 * 60_000).toISOString()
+    });
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Wake up."
+    });
+    const evaluator: ActivationEvaluator = {
+      evaluate: async () => ({
+        shouldRespond: false,
+        urgency: 0,
+        confidence: 0
+      })
+    };
+    const generator: SpeakerGenerator = {
+      generate: async () => {
+        throw new Error("No speaker should be selected");
+      }
+    };
+    const scheduler = new ConversationScheduler({
+      store,
+      evaluator,
+      generator,
+      now: () => now
+    });
+
+    await scheduler.runFromHumanMessage(room.id, human.id);
+
+    expect(store.getRuntime(room.id, "alpha").fatigue).toBeCloseTo(0.5);
+    store.close();
+  });
 });

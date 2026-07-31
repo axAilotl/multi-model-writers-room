@@ -110,22 +110,27 @@ export async function parsePdf(bytes: Buffer): Promise<ArtifactChunk[]> {
     data: new Uint8Array(bytes)
   });
   const document = await task.promise;
-  if (document.numPages > 500) {
+  try {
+    if (document.numPages > 500) {
+      throw new Error("PDF exceeds the 500 page limit");
+    }
+    const drafts: ChunkDraft[] = [];
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      try {
+        const content = await page.getTextContent();
+        const text = content.items
+          .map(item => ("str" in item ? item.str : ""))
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (text) drafts.push({ text, pageNumber });
+      } finally {
+        page.cleanup();
+      }
+    }
+    return finalizeChunks(drafts);
+  } finally {
     await document.destroy();
-    throw new Error("PDF exceeds the 500 page limit");
   }
-  const drafts: ChunkDraft[] = [];
-  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-    const page = await document.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const text = content.items
-      .map(item => ("str" in item ? item.str : ""))
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (text) drafts.push({ text, pageNumber });
-    page.cleanup();
-  }
-  await document.destroy();
-  return finalizeChunks(drafts);
 }

@@ -115,4 +115,40 @@ describe("OpenAI-compatible provider seam", () => {
     await expect(collect()).rejects.toMatchObject({ name: "AbortError" });
     expect(fetcher).toHaveBeenCalledOnce();
   });
+
+  it("keeps the provider tool-call ID across fragmented deltas", async () => {
+    const body = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-real","function":{"name":"search_","arguments":"{\\"query\\":"}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"workspace","arguments":"\\"table\\"}"}}]}}]}',
+      "data: [DONE]",
+      ""
+    ].join("\n\n");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }));
+    const provider = new OpenAiCompatibleProvider({
+      id: "generic",
+      baseUrl: "http://model.test/v1",
+      fetcher
+    });
+
+    const events = [];
+    for await (const event of provider.streamChat(request)) events.push(event);
+
+    expect(events).toEqual([
+      {
+        type: "tool-call",
+        id: "call-real",
+        name: "search_",
+        arguments: '{"query":'
+      },
+      {
+        type: "tool-call",
+        id: "call-real",
+        name: "workspace",
+        arguments: '"table"}'
+      }
+    ]);
+  });
 });

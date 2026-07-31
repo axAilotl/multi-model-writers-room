@@ -890,7 +890,13 @@ export class RoomStore {
       VALUES (?, ?, ?, ?, ?)
     `).run(roomId, sequence, type, JSON.stringify(event), new Date().toISOString());
     queueMicrotask(() => {
-      for (const listener of this.eventListeners) listener(roomId, event);
+      for (const listener of this.eventListeners) {
+        try {
+          listener(roomId, event);
+        } catch (error) {
+          console.error("Room event listener failed", error);
+        }
+      }
     });
   }
 

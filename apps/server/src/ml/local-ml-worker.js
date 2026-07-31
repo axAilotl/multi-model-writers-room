@@ -101,5 +101,16 @@ parentPort.on("message", message => {
           error: error instanceof Error ? error.message : String(error)
         });
       }
+    })
+    .catch(error => {
+      try {
+        parentPort.postMessage({
+          id: message.id,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      } catch {
+        // The parent has already closed; keep the worker queue settled.
+      }
     });
 });

@@ -112,7 +112,7 @@ export class RoomEngine {
               name: "",
               arguments: ""
             };
-            current.name = event.name || current.name;
+            current.name += event.name;
             current.arguments += event.arguments;
             calls.set(event.id, current);
           }

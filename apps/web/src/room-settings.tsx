@@ -1,7 +1,12 @@
 import { Check, LoaderCircle, Save } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import type { Room, RoomSettings } from "@writers-room/contracts";
+import {
+  roomSettingsSchema,
+  type Room,
+  type RoomSettings
+} from "@writers-room/contracts";
 import { api } from "./api.js";
+import { validationMessage } from "./validation.js";
 
 export function RoomSettingsEditor({
   room,
@@ -25,10 +30,16 @@ export function RoomSettingsEditor({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    setSaving(true);
     setError(undefined);
+    const result = roomSettingsSchema.safeParse(settings);
+    if (!result.success) {
+      setSaved(false);
+      setError(validationMessage("Cannot save room settings", result.error));
+      return;
+    }
+    setSaving(true);
     try {
-      const updated = await api.updateRoom(room.id, { settings });
+      const updated = await api.updateRoom(room.id, { settings: result.data });
       onRoomChanged(updated);
       setSaved(true);
     } catch (errorValue) {
@@ -39,7 +50,7 @@ export function RoomSettingsEditor({
   }
 
   return (
-    <form className="settings-form" onSubmit={submit}>
+    <form className="settings-form" noValidate onSubmit={submit}>
       <div className="settings-section-heading">
         <div>
           <span className="eyebrow">Conversation behavior</span>

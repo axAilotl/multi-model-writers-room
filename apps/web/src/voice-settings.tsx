@@ -87,7 +87,11 @@ export function SettingsPage({
           {section === "voices" && <VoiceTemplateEditor />}
           {section === "providers" && <ProviderSettings />}
           {section === "room" && (
-            <RoomSettingsEditor room={room} onRoomChanged={onRoomChanged} />
+            <RoomSettingsEditor
+              key={room.id}
+              room={room}
+              onRoomChanged={onRoomChanged}
+            />
           )}
         </main>
       </div>

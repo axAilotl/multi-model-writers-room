@@ -162,4 +162,81 @@ describe("shared workspace seam", () => {
       .toThrow(/does not belong/);
     store.close();
   });
+
+  it("applies artifact filtering before the exact-search limit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-exact-filter-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Filtered evidence room" });
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: new FixtureEmbeddingModel(),
+      housekeeping
+    });
+    const allowed = await workspace.ingest({
+      roomId: room.id,
+      filename: "allowed.txt",
+      mediaType: "text/plain",
+      bytes: Buffer.from("needle in the allowed artifact")
+    });
+    await workspace.ingest({
+      roomId: room.id,
+      filename: "newer-noise.txt",
+      mediaType: "text/plain",
+      bytes: Buffer.from(
+        Array.from({ length: 60 }, (_, index) => `needle noise paragraph ${index}`)
+          .join("\n\n")
+      )
+    });
+
+    const matches = workspace.findExact({
+      roomId: room.id,
+      query: "needle",
+      artifactIds: [allowed.id],
+      limit: 1
+    });
+
+    expect(matches).toHaveLength(1);
+    expect(matches[0]).toMatchObject({ artifactId: allowed.id });
+    store.close();
+  });
+
+  it("retries a failed upload instead of returning the failed deduplication record", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-upload-retry-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Retry room" });
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: new FixtureEmbeddingModel(),
+      housekeeping
+    });
+    const bytes = Buffer.from("This retry should become searchable.");
+
+    await expect(workspace.ingest({
+      roomId: room.id,
+      filename: "unknown.bin",
+      mediaType: "application/octet-stream",
+      bytes
+    })).rejects.toThrow(/Unsupported artifact format/);
+    const failed = workspace.listArtifacts(room.id)[0]!;
+    expect(failed.ingestionStatus).toBe("failed");
+
+    const recovered = await workspace.ingest({
+      roomId: room.id,
+      filename: "recovered.txt",
+      mediaType: "text/plain",
+      bytes
+    });
+
+    expect(recovered).toMatchObject({
+      filename: "recovered.txt",
+      ingestionStatus: "ready"
+    });
+    expect(recovered.id).not.toBe(failed.id);
+    expect(workspace.listArtifacts(room.id)).toHaveLength(1);
+    store.close();
+  });
 });

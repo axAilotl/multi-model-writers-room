@@ -42,6 +42,8 @@ const speakerSchema = z.object({
   targetMessageId: z.string().optional()
 });
 
+const VOICE_GENERATION_TIMEOUT_MS = 5 * 60_000;
+
 function asyncRoute(
   handler: (request: express.Request, response: express.Response) => Promise<void>
 ): express.RequestHandler {
@@ -160,7 +162,7 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       const timeout = setTimeout(() => {
         timedOut = true;
         controller.abort();
-      }, 90_000);
+      }, VOICE_GENERATION_TIMEOUT_MS);
       const abortDisconnectedRequest = () => {
         if (!response.writableEnded) controller.abort();
       };

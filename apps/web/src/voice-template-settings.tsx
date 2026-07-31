@@ -10,6 +10,7 @@ import {
 import { useEffect, useState, type FormEvent } from "react";
 import {
   defaultRoomToolNames,
+  voiceTemplateInputSchema,
   type DefaultModelSelection,
   type VoiceTemplate,
   type VoiceTemplateInput
@@ -18,6 +19,7 @@ import { api } from "./api.js";
 import { ModelPicker } from "./model-picker.js";
 import { providerLabels } from "./provider-labels.js";
 import { VoiceGeneratorModal } from "./voice-generator-modal.js";
+import { validationMessage } from "./validation.js";
 import {
   blankVoiceTemplate,
   voiceTemplateInput
@@ -96,12 +98,18 @@ export function VoiceTemplateEditor() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    setSaving(true);
     setError(undefined);
+    const result = voiceTemplateInputSchema.safeParse(draft);
+    if (!result.success) {
+      setSaved(false);
+      setError(validationMessage("Cannot save template", result.error));
+      return;
+    }
+    setSaving(true);
     try {
       const saved = selectedId
-        ? await api.updateVoiceTemplate(selectedId, draft)
-        : await api.createVoiceTemplate(draft);
+        ? await api.updateVoiceTemplate(selectedId, result.data)
+        : await api.createVoiceTemplate(result.data);
       setTemplates(current => [
         saved,
         ...current.filter(template => template.id !== saved.id)
@@ -165,7 +173,7 @@ export function VoiceTemplateEditor() {
             </button>
           ))}
         </aside>
-        <form className="template-form" onSubmit={submit}>
+        <form className="template-form" noValidate onSubmit={submit}>
           <div className="field-row">
             <label>Template title
               <input
@@ -194,10 +202,13 @@ export function VoiceTemplateEditor() {
             <label>Provider
               <select
                 value={draft.provider}
-                onChange={event => update(
-                  "provider",
-                  event.target.value as VoiceTemplateInput["provider"]
-                )}
+                onChange={event => {
+                  update(
+                    "provider",
+                    event.target.value as VoiceTemplateInput["provider"]
+                  );
+                  update("modelId", "");
+                }}
               >
                 {Object.entries(providerLabels).map(([value, label]) => (
                   <option value={value} key={value}>{label}</option>

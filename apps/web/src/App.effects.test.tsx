@@ -290,6 +290,8 @@ describe("App effect lifecycle", () => {
       configurable: true,
       value: () => {}
     });
+    let generatedTemplateCount = 0;
+    let savedTemplateCount = 0;
     const fetchMock = vi.fn(async (
       input: RequestInfo | URL,
       init?: RequestInit
@@ -300,16 +302,19 @@ describe("App effect lifecycle", () => {
         path.endsWith("/api/v1/voice-templates/generate") &&
         init?.method === "POST"
       ) {
+        generatedTemplateCount += 1;
+        const secondDraft = generatedTemplateCount === 2;
         payload = {
           template: {
-            title: "Product Heretic",
-            name: "Mara",
+            title: secondDraft ? "Systems Realist" : "Product Heretic",
+            name: secondDraft ? "Niko" : "Mara",
             description: "Questions comfortable assumptions.",
             provider: "openrouter",
             modelId: "anthropic/claude-sonnet",
             systemPrompt: "Challenge the proposal and expose neglected alternatives.",
             personaPrompt: "Provocative, concrete, and constructive.",
-            temperature: 0.85,
+            temperature: secondDraft ? 0.87 : 0.85,
+            ...(secondDraft ? { topP: 0.73 } : {}),
             maxOutputTokens: 1_200,
             reasoning: {
               enabled: true,
@@ -328,10 +333,11 @@ describe("App effect lifecycle", () => {
         };
       } else if (path.endsWith("/api/v1/voice-templates")) {
         if (init?.method === "POST") {
+          savedTemplateCount += 1;
           payload = {
             template: {
               ...requestBody<Record<string, unknown>>(init),
-              id: "saved-template-1",
+              id: `saved-template-${savedTemplateCount}`,
               createdAt: "2026-07-31T12:00:00.000Z",
               updatedAt: "2026-07-31T12:00:00.000Z"
             }
@@ -537,6 +543,73 @@ describe("App effect lifecycle", () => {
     )).toBe(true);
     expect(document.body.textContent).toContain("Product Heretic");
     expect(document.body.textContent).toContain("Saved");
+
+    await act(async () => generateVoice!.click());
+    const secondGenerator = document.querySelector<HTMLFormElement>(
+      '.voice-generator-modal[role="dialog"]'
+    );
+    const secondName = secondGenerator?.querySelector<HTMLInputElement>(
+      'input[name="generatedVoiceName"]'
+    );
+    const secondSource = secondGenerator?.querySelector<HTMLTextAreaElement>(
+      'textarea[name="voiceSourceText"]'
+    );
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
+        ?.set?.call(secondName, "Niko");
+      secondName!.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")
+        ?.set?.call(
+          secondSource,
+          "A systems realist who distinguishes operational constraints from imagined limitations."
+        );
+      secondSource!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      secondGenerator!.requestSubmit();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    const secondCreate = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".template-form button"
+    )).find(button => button.textContent?.includes("Create template"));
+    await act(async () => {
+      secondCreate!.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(fetchMock.mock.calls.filter(([input, init]) =>
+      String(input).endsWith("/api/v1/voice-templates") &&
+      init?.method === "POST"
+    )).toHaveLength(2);
+    expect(document.body.textContent).toContain("Product Heretic");
+    expect(document.body.textContent).toContain("Systems Realist");
+
+    const newTemplate = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".settings-heading-actions button"
+    )).find(button => button.textContent?.includes("New template"));
+    await act(async () => newTemplate!.click());
+    const unsavedName = document.querySelector<HTMLInputElement>(
+      '.template-form input[placeholder="Systems Engineer"]'
+    );
+    const unsavedModel = document.querySelector<HTMLInputElement>(
+      '.template-form input[name="modelId"]'
+    );
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
+        ?.set?.call(unsavedName, "Missing Model");
+      unsavedName!.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
+        ?.set?.call(unsavedModel, "");
+      unsavedModel!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const invalidCreate = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".template-form button"
+    )).find(button => button.textContent?.includes("Create template"));
+    await act(async () => invalidCreate!.click());
+    expect(document.body.textContent).toContain("Cannot save template: modelId");
+    expect(fetchMock.mock.calls.filter(([input, init]) =>
+      String(input).endsWith("/api/v1/voice-templates") &&
+      init?.method === "POST"
+    )).toHaveLength(2);
 
     const providers = Array.from(document.querySelectorAll<HTMLButtonElement>(
       ".settings-layout nav button"

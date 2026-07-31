@@ -1,5 +1,4 @@
 import {
-  Archive,
   Bot,
   BrainCircuit,
   ChevronDown,
@@ -10,7 +9,6 @@ import {
   LoaderCircle,
   MessageSquareText,
   Mic2,
-  MoreHorizontal,
   PanelLeft,
   Plus,
   RotateCcw,
@@ -44,6 +42,7 @@ import type {
   VoiceTemplateInput,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
+import { agentDefinitionSchema } from "@writers-room/contracts";
 import { api } from "./api.js";
 import {
   ModelPicker,
@@ -53,6 +52,7 @@ import {
   blankVoiceTemplate,
   voiceTemplateInput
 } from "./voice-template.js";
+import { validationMessage } from "./validation.js";
 
 const participantColors = ["#c96c47", "#637d68", "#7566a3", "#b08a3f", "#477b8f"];
 
@@ -308,8 +308,11 @@ function WorkspacePanel({ snapshot, onChanged }: {
             accept=".md,.markdown,.txt,.pdf,text/plain,text/markdown,application/pdf"
             disabled={uploading}
             onChange={event => {
-              const file = event.target.files?.[0];
-              if (file) void upload(file);
+              const input = event.currentTarget;
+              const file = input.files?.[0];
+              if (file) void upload(file).finally(() => {
+                input.value = "";
+              });
             }}
           />
         </label>
@@ -327,11 +330,11 @@ function WorkspacePanel({ snapshot, onChanged }: {
         <div className="search-results">
           <div className="section-label">Search results</div>
           {results.slice(0, 4).map(result => (
-            <button className="search-result" key={result.chunk.id}>
+            <div className="search-result" key={result.chunk.id}>
               <strong>{result.artifact.filename}</strong>
               <span>{result.chunk.text.slice(0, 110)}…</span>
               <code>{result.citation}</code>
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -353,7 +356,6 @@ function WorkspacePanel({ snapshot, onChanged }: {
                 {artifact.ingestionStatus}
               </small>
             </div>
-            <button className="ghost-button"><MoreHorizontal size={14} /></button>
           </div>
         ))}
       </div>
@@ -430,26 +432,31 @@ function AddAgent({ roomId, onAdded, onClose }: {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    setSaving(true);
     setError(undefined);
+    const id = `${draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${Date.now().toString(36)}`;
+    const result = agentDefinitionSchema.safeParse({
+      id,
+      name: draft.name,
+      description: draft.description,
+      provider: draft.provider,
+      modelId: draft.modelId,
+      systemPrompt: draft.systemPrompt,
+      ...(draft.personaPrompt ? { personaPrompt: draft.personaPrompt } : {}),
+      temperature: draft.temperature,
+      ...(draft.topP === undefined ? {} : { topP: draft.topP }),
+      maxOutputTokens: draft.maxOutputTokens,
+      reasoning: draft.reasoning,
+      tools: [...draft.tools],
+      contextBudget: { ...draft.contextBudget },
+      ...(capabilities === undefined ? {} : { capabilities })
+    });
+    if (!result.success) {
+      setError(validationMessage("Cannot add participant", result.error));
+      return;
+    }
+    setSaving(true);
     try {
-      const id = `${draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${Date.now().toString(36)}`;
-      await api.addAgent(roomId, {
-        id,
-        name: draft.name,
-        description: draft.description,
-        provider: draft.provider,
-        modelId: draft.modelId,
-        systemPrompt: draft.systemPrompt,
-        ...(draft.personaPrompt ? { personaPrompt: draft.personaPrompt } : {}),
-        temperature: draft.temperature,
-        ...(draft.topP === undefined ? {} : { topP: draft.topP }),
-        maxOutputTokens: draft.maxOutputTokens,
-        reasoning: draft.reasoning,
-        tools: [...draft.tools],
-        contextBudget: { ...draft.contextBudget },
-        ...(capabilities === undefined ? {} : { capabilities })
-      });
+      await api.addAgent(roomId, result.data);
       onAdded();
       onClose();
     } catch (errorValue) {
@@ -463,7 +470,7 @@ function AddAgent({ roomId, onAdded, onClose }: {
     <div className="modal-backdrop" onMouseDown={event => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <form className="agent-modal agent-modal-wide" onSubmit={submit}>
+      <form className="agent-modal agent-modal-wide" noValidate onSubmit={submit}>
         <header>
           <div><Bot size={18} /> Add a voice</div>
           <button type="button" className="icon-button" onClick={onClose}><X size={16} /></button>
@@ -507,10 +514,14 @@ function AddAgent({ roomId, onAdded, onClose }: {
           <label>Provider
             <select
               value={draft.provider}
-              onChange={event => update(
-                "provider",
-                event.target.value as AgentDefinition["provider"]
-              )}
+              onChange={event => {
+                update(
+                  "provider",
+                  event.target.value as AgentDefinition["provider"]
+                );
+                update("modelId", "");
+                setCapabilities(undefined);
+              }}
             >
               <option value="openrouter">OpenRouter</option>
               <option value="ollama">Ollama</option>
@@ -558,8 +569,9 @@ function AddAgent({ roomId, onAdded, onClose }: {
   );
 }
 
-function ParticipantsPanel({ snapshot, onAction, onAdd }: {
+function ParticipantsPanel({ snapshot, busy, onAction, onAdd }: {
   snapshot: RoomSnapshot;
+  busy: boolean;
   onAction: (action: () => Promise<unknown>) => void;
   onAdd: () => void;
 }) {
@@ -567,7 +579,7 @@ function ParticipantsPanel({ snapshot, onAction, onAdd }: {
     <aside className="right-panel">
       <div className="panel-title">
         <span><Users size={16} /> In the room</span>
-        <button className="icon-button" onClick={onAdd} aria-label="Add voice">
+        <button className="icon-button" onClick={onAdd} disabled={busy} aria-label="Add voice">
           <Plus size={15} />
         </button>
       </div>
@@ -610,6 +622,7 @@ function ParticipantsPanel({ snapshot, onAction, onAdd }: {
               </div>
               <div className="participant-actions">
                 <button
+                  disabled={busy}
                   title={runtime?.muted ? "Unmute" : "Mute"}
                   onClick={() => onAction(() =>
                     api.mute(snapshot.room.id, agent.id, !(runtime?.muted ?? false))
@@ -618,7 +631,7 @@ function ParticipantsPanel({ snapshot, onAction, onAdd }: {
                   {runtime?.muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
                 </button>
                 <button
-                  disabled={generating || runtime?.muted}
+                  disabled={busy || generating || runtime?.muted}
                   onClick={() => onAction(() =>
                     api.selectSpeaker(snapshot.room.id, agent.id)
                   )}
@@ -788,6 +801,7 @@ export default function App() {
             onClick={() => setShowSettings(true)}
             aria-label="Open settings"
             title="Settings"
+            disabled={busy}
           >
             <SettingsIcon size={15} />
           </button>
@@ -798,6 +812,7 @@ export default function App() {
               onClick={() => void act(() => api.updateRoom(snapshot.room.id, {
                 settings: { autoMode: !snapshot.room.settings.autoMode }
               }))}
+              disabled={busy}
             ><i /></button>
           </label>
           <label className="compact-select">
@@ -807,6 +822,7 @@ export default function App() {
               onChange={event => void act(() => api.updateRoom(snapshot.room.id, {
                 settings: { maxResponders: Number(event.target.value) }
               }))}
+              disabled={busy}
             >
               <option value={1}>Focused</option>
               <option value={2}>Workshop</option>
@@ -818,6 +834,7 @@ export default function App() {
             onClick={() => void act(() => api.updateRoom(snapshot.room.id, {
               status: snapshot.room.status === "running" ? "paused" : "running"
             }))}
+            disabled={busy}
           >
             {snapshot.room.status === "running"
               ? <><CirclePause size={15} /> Pause</>
@@ -869,7 +886,6 @@ export default function App() {
             />
             <div className="composer-footer">
               <div>
-                <button type="button" title="Reference a document"><Archive size={15} /></button>
                 <span>Enter to send · Shift+Enter for a new line</span>
               </div>
               <button className="send-button" disabled={!composer.trim() || busy}>
@@ -880,6 +896,7 @@ export default function App() {
         </main>
         <ParticipantsPanel
           snapshot={snapshot}
+          busy={busy}
           onAction={action => void act(action)}
           onAdd={() => setShowAgent(true)}
         />

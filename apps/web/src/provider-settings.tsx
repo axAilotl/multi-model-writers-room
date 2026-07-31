@@ -87,7 +87,10 @@ export function ProviderSettings() {
           <button
             key={provider}
             className={selected === provider ? "active" : ""}
-            onClick={() => setSelected(provider)}
+            onClick={() => {
+              setSelected(provider);
+              setQuery("");
+            }}
           >
             <span className={providers.includes(provider) ? "connected-dot" : "offline-dot"} />
             <strong>{providerLabels[provider]}</strong>
