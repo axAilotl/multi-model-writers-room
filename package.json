@@ -23,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "concurrently": "^9.2.0",
+    "jsdom": "30.0.1",
     "typescript": "^5.9.0",
     "vitest": "^4.0.0"
   },

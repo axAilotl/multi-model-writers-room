@@ -163,7 +163,9 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
 }) {
   const bottom = useRef<HTMLDivElement>(null);
   const messages = snapshot.messages.filter(message => message.lifecycle === "active");
-  useEffect(() => bottom.current?.scrollIntoView({ behavior: "smooth" }), [messages.length]);
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
   return (
     <div className="conversation-scroll">
       <div className="day-divider"><span>Today</span></div>
