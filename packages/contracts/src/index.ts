@@ -48,6 +48,21 @@ export const defaultModelSelectionSchema = z.object({
 });
 export type DefaultModelSelection = z.infer<typeof defaultModelSelectionSchema>;
 
+export const defaultRoomToolNames = [
+  "list_workspace",
+  "get_artifact_summary",
+  "search_workspace",
+  "find_exact_text",
+  "read_artifact_chunk",
+  "read_artifact_range",
+  "read_shared_scratchpad",
+  "append_shared_note",
+  "update_shared_note",
+  "inspect_room_state",
+  "yield_turn",
+  "request_another_agent"
+] as const;
+
 export const contextBudgetSchema = z.object({
   softLimitTokens: z.number().int().positive(),
   hardLimitTokens: z.number().int().positive(),
@@ -84,6 +99,29 @@ export const voiceTemplateInputSchema = agentDefinitionSchema
     title: z.string().trim().min(1).max(120)
   });
 export type VoiceTemplateInput = z.infer<typeof voiceTemplateInputSchema>;
+
+export function createDefaultVoiceConfiguration(): Pick<
+  VoiceTemplateInput,
+  "temperature" | "maxOutputTokens" | "reasoning" | "tools" | "contextBudget"
+> {
+  return {
+    temperature: 0.7,
+    maxOutputTokens: 1_200,
+    reasoning: {
+      enabled: true,
+      effort: "medium",
+      displayMode: "summary"
+    },
+    tools: [...defaultRoomToolNames],
+    contextBudget: {
+      softLimitTokens: 120_000,
+      hardLimitTokens: 160_000,
+      recentTranscriptTokens: 70_000,
+      retrievedContextTokens: 24_000,
+      notebookTokens: 0
+    }
+  };
+}
 
 export const voiceTemplateGenerationRequestSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -256,21 +294,6 @@ export interface NormalizedToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
 }
-
-export const defaultRoomToolNames = [
-  "list_workspace",
-  "get_artifact_summary",
-  "search_workspace",
-  "find_exact_text",
-  "read_artifact_chunk",
-  "read_artifact_range",
-  "read_shared_scratchpad",
-  "append_shared_note",
-  "update_shared_note",
-  "inspect_room_state",
-  "yield_turn",
-  "request_another_agent"
-] as const;
 
 export interface NormalizedChatRequest {
   modelId: string;

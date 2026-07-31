@@ -6,11 +6,12 @@ import {
   Users,
   X
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import type { Room } from "@writers-room/contracts";
 import { ProviderSettings } from "./provider-settings.js";
 import { RoomSettingsEditor } from "./room-settings.js";
 import { VoiceTemplateEditor } from "./voice-template-settings.js";
+import { useModalFocus } from "./use-modal-focus.js";
 
 export { ModelPicker } from "./model-picker.js";
 
@@ -24,46 +25,13 @@ export function SettingsPage({
   onRoomChanged: (room: Room) => void;
 }) {
   const [section, setSection] = useState<"room" | "voices" | "providers">("voices");
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : undefined;
-    closeButtonRef.current?.focus();
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (dialogRef.current?.querySelector(".voice-generator-modal")) return;
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(
-        dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        ) ?? []
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0]!;
-      const last = focusable[focusable.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previouslyFocused?.focus();
-    };
-  }, [onClose]);
+  const {
+    dialogRef,
+    initialFocusRef: closeButtonRef
+  } = useModalFocus<HTMLDivElement, HTMLButtonElement>({
+    onClose,
+    ignoreWhenSelector: ".voice-generator-modal"
+  });
 
   return (
     <div

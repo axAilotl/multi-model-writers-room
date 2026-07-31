@@ -30,6 +30,21 @@ class FixtureProvider implements ModelProvider {
           reasoningOutput: true,
           promptCaching: true
         }
+      },
+      {
+        id: "image-only/model",
+        name: "Image-only model",
+        capabilities: {
+          contextLength: 32_000,
+          textInput: false,
+          imageInput: true,
+          pdfInput: false,
+          toolCalling: false,
+          structuredOutput: false,
+          reasoningInputControl: false,
+          reasoningOutput: false,
+          promptCaching: false
+        }
       }
     ];
   }
@@ -90,19 +105,17 @@ describe("local HTTP room seam", () => {
       .get("/api/v1/providers/openrouter/models")
       .expect(200);
 
-    expect(response.body).toMatchObject({
-      provider: "openrouter",
-      models: [
-        {
-          id: "anthropic/claude-sonnet",
-          name: "Claude Sonnet",
-          capabilities: {
-            contextLength: 200_000,
-            imageInput: true,
-            toolCalling: true
-          }
-        }
-      ]
+    expect(response.body.provider).toBe("openrouter");
+    expect(response.body.models.find((model: { id: string }) =>
+      model.id === "anthropic/claude-sonnet"
+    )).toMatchObject({
+      id: "anthropic/claude-sonnet",
+      name: "Claude Sonnet",
+      capabilities: {
+        contextLength: 200_000,
+        imageInput: true,
+        toolCalling: true
+      }
     });
     store.close();
   });
@@ -116,6 +129,15 @@ describe("local HTTP room seam", () => {
       store: firstStore,
       providers: new Map([["openrouter", new FixtureProvider()]])
     });
+
+    await request(firstApplication)
+      .put("/api/v1/settings/default-model")
+      .send({ provider: "openrouter", modelId: "image-only/model" })
+      .expect(400);
+    const stillEmpty = await request(firstApplication)
+      .get("/api/v1/settings/default-model")
+      .expect(200);
+    expect(stillEmpty.body.defaultModel).toBeNull();
 
     const saved = await request(firstApplication)
       .put("/api/v1/settings/default-model")
@@ -178,6 +200,7 @@ describe("local HTTP room seam", () => {
       temperature: 0.85
     });
     expect(provider.lastRequest?.modelId).toBe("anthropic/claude-sonnet");
+    expect(provider.lastRequest?.signal).toBeInstanceOf(AbortSignal);
     expect(provider.lastRequest?.messages.at(-1)?.content)
       .toContain("what users truly need");
     const templates = await request(application)

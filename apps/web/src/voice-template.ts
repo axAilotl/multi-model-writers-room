@@ -3,12 +3,13 @@ import type {
   VoiceTemplate,
   VoiceTemplateInput
 } from "@writers-room/contracts";
-import { defaultRoomToolNames } from "@writers-room/contracts";
+import { createDefaultVoiceConfiguration } from "@writers-room/contracts";
 
 export function blankVoiceTemplate(
   defaultModel?: DefaultModelSelection
 ): VoiceTemplateInput {
   return {
+    ...createDefaultVoiceConfiguration(),
     title: "New voice",
     name: "",
     description: "",
@@ -16,21 +17,6 @@ export function blankVoiceTemplate(
     modelId: defaultModel?.modelId ?? "",
     systemPrompt: "Advance the discussion from your distinct expertise.",
     personaPrompt: "",
-    temperature: 0.7,
-    maxOutputTokens: 1_200,
-    reasoning: {
-      enabled: true,
-      effort: "medium",
-      displayMode: "summary"
-    },
-    tools: [...defaultRoomToolNames],
-    contextBudget: {
-      softLimitTokens: 120_000,
-      hardLimitTokens: 160_000,
-      recentTranscriptTokens: 70_000,
-      retrievedContextTokens: 24_000,
-      notebookTokens: 0
-    }
   };
 }
 

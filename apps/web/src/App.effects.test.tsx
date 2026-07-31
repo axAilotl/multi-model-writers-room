@@ -117,6 +117,21 @@ describe("App effect lifecycle", () => {
                 reasoningOutput: true,
                 promptCaching: true
               }
+            },
+            {
+              id: "provider/extremely-long-model-identifier-that-must-stay-contained",
+              name: "An Extremely Long Experimental Model Name That Must Stay Inside the Picker",
+              capabilities: {
+                contextLength: 64_000,
+                textInput: true,
+                imageInput: false,
+                pdfInput: false,
+                toolCalling: false,
+                structuredOutput: false,
+                reasoningInputControl: false,
+                reasoningOutput: false,
+                promptCaching: false
+              }
             }
           ]
         };
@@ -217,14 +232,26 @@ describe("App effect lifecycle", () => {
       'input[name="modelId"]'
     );
     expect(model?.value).toBe("anthropic/claude-sonnet");
-    const modelList = document.getElementById(model?.getAttribute("list") ?? "");
-    expect(modelList?.querySelector('option[value="anthropic/claude-sonnet"]')
-      ?.getAttribute("label")).toBe("Claude Sonnet");
     expect(document.querySelector('[aria-label="Filter models"]')).toBeNull();
     expect(document.querySelector('select[name="modelId"]')).toBeNull();
+    expect(document.querySelector(".agent-modal-wide")).not.toBeNull();
     expect(document.body.textContent).toContain("PDF");
     expect(document.body.textContent).toContain("structured output");
     expect(document.body.textContent).toContain("prompt caching");
+    await act(async () => {
+      model!.focus();
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value"
+      )?.set?.call(model, "claude");
+      model!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const suggestions = Array.from(document.querySelectorAll<HTMLElement>(
+      '.model-options [role="option"]'
+    ));
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]?.textContent).toContain("Claude Sonnet");
+    expect(suggestions[0]?.textContent).not.toContain("Extremely Long");
 
     const template = document.querySelector<HTMLSelectElement>(
       'select[name="voiceTemplate"]'
@@ -307,7 +334,12 @@ describe("App effect lifecycle", () => {
                 modelId: string;
               }
             }
-          : { defaultModel: null };
+          : {
+              defaultModel: {
+                provider: "openrouter",
+                modelId: "anthropic/claude-sonnet"
+              }
+            };
       } else if (path.includes("/api/v1/providers/openrouter/models")) {
         payload = {
           provider: "openrouter",
@@ -325,6 +357,36 @@ describe("App effect lifecycle", () => {
                 reasoningInputControl: true,
                 reasoningOutput: true,
                 promptCaching: true
+              }
+            },
+            {
+              id: "provider/extremely-long-model-identifier-that-must-stay-contained",
+              name: "An Extremely Long Experimental Model Name That Must Stay Inside the Picker",
+              capabilities: {
+                contextLength: 64_000,
+                textInput: true,
+                imageInput: false,
+                pdfInput: false,
+                toolCalling: false,
+                structuredOutput: false,
+                reasoningInputControl: false,
+                reasoningOutput: false,
+                promptCaching: false
+              }
+            },
+            {
+              id: "image-only/settings-model",
+              name: "Image-only settings model",
+              capabilities: {
+                contextLength: 32_000,
+                textInput: false,
+                imageInput: true,
+                pdfInput: false,
+                toolCalling: false,
+                structuredOutput: false,
+                reasoningInputControl: false,
+                reasoningOutput: false,
+                promptCaching: false
               }
             }
           ]
@@ -383,9 +445,9 @@ describe("App effect lifecycle", () => {
     const settingsModel = document.querySelector<HTMLInputElement>(
       'input[name="modelId"]'
     );
-    expect(document.getElementById(settingsModel?.getAttribute("list") ?? "")
-      ?.querySelector('option[value="anthropic/claude-sonnet"]')
-      ?.getAttribute("label")).toBe("Claude Sonnet");
+    await act(async () => settingsModel?.focus());
+    expect(document.querySelector(".model-options")?.textContent)
+      .toContain("Claude Sonnet");
     expect(document.body.textContent).toContain("Top P");
     expect(document.body.textContent).toContain("Reasoning token cap");
     expect(document.body.textContent).toContain("Tools");
@@ -452,6 +514,10 @@ describe("App effect lifecycle", () => {
       await new Promise(resolve => setTimeout(resolve, 0));
     });
     expect(document.body.textContent).toContain("Default fallback model");
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".catalog-list button"
+    )).find(button => button.textContent?.includes("No text input"))?.disabled)
+      .toBe(true);
     const setDefault = Array.from(document.querySelectorAll<HTMLButtonElement>(
       ".catalog-list button"
     )).find(button => button.textContent?.includes("Set default"));
@@ -463,7 +529,7 @@ describe("App effect lifecycle", () => {
       .filter(([, init]) => init?.method === "PUT")
       .map(([, init]) => String(init?.body)))
       .toContainEqual(expect.stringContaining(
-        '"modelId":"anthropic/claude-sonnet"'
+        '"modelId":"provider/extremely-long-model-identifier-that-must-stay-contained"'
       ));
     expect(document.body.textContent).toContain("Current default");
 

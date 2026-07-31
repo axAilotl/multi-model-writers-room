@@ -61,6 +61,8 @@ interface JsonRow {
   payload_json: string;
 }
 
+const DEFAULT_MODEL_SETTING_KEY = "default_model" as const;
+
 type RoomSettingsPatch = {
   [Key in keyof RoomSettings]?: RoomSettings[Key] | undefined;
 };
@@ -229,7 +231,7 @@ export class RoomStore {
   getDefaultModel(): DefaultModelSelection | undefined {
     const row = this.database.prepare(
       "SELECT payload_json FROM application_settings WHERE key = ?"
-    ).get("default_model") as JsonRow | undefined;
+    ).get(DEFAULT_MODEL_SETTING_KEY) as JsonRow | undefined;
     return row === undefined
       ? undefined
       : defaultModelSelectionSchema.parse(JSON.parse(row.payload_json));
@@ -243,7 +245,11 @@ export class RoomStore {
       ON CONFLICT(key) DO UPDATE SET
         payload_json = excluded.payload_json,
         updated_at = excluded.updated_at
-    `).run("default_model", JSON.stringify(parsed), new Date().toISOString());
+    `).run(
+      DEFAULT_MODEL_SETTING_KEY,
+      JSON.stringify(parsed),
+      new Date().toISOString()
+    );
     return parsed;
   }
 

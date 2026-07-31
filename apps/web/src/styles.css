@@ -192,7 +192,7 @@ button { color: inherit; }
 .primary-button { border: 0; color: white; background: var(--accent); }
 .primary-button:hover { background: var(--accent-dark); }
 .secondary-button { border: 1px solid var(--line); background: white; }
-.model-picker { display: flex; flex-direction: column; gap: 5px; }
+.model-picker { position: relative; display: flex; flex-direction: column; gap: 5px; }
 .model-filter {
   display: grid; grid-template-columns: 1fr 30px; border: 1px solid var(--line);
   border-radius: 6px; overflow: hidden; background: white;
@@ -202,6 +202,23 @@ button { color: inherit; }
   border: 0; border-left: 1px solid var(--line); background: #f5f3ed;
   color: #777268; display: grid; place-items: center; cursor: pointer;
 }
+.model-options {
+  position: absolute; z-index: 12; top: 38px; left: 0; right: 0; max-height: 260px;
+  overflow-y: auto; border: 1px solid var(--line); border-radius: 7px;
+  background: white; box-shadow: 0 14px 32px #2420162e;
+}
+.model-options > button {
+  width: 100%; min-width: 0; padding: 8px 10px; border: 0; border-bottom: 1px solid #eeeae1;
+  background: white; color: var(--ink); cursor: pointer; text-align: left;
+}
+.model-options > button:last-of-type { border-bottom: 0; }
+.model-options > button:hover, .model-options > button.active { background: #f0ece4; }
+.model-options strong, .model-options code {
+  display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.model-options strong { font-size: 10px; }
+.model-options code { margin-top: 3px; color: #8b857a; font-size: 8px; }
+.model-options-empty { padding: 9px 10px; color: #8b857a; font-size: 9px; }
 .capability-pills { display: flex; flex-wrap: wrap; gap: 4px; }
 .capability-pills span {
   padding: 3px 6px; border-radius: 9px; background: #ebe7dc; color: #777064;
@@ -284,7 +301,7 @@ button { color: inherit; }
   display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;
   padding: 14px 16px; border: 1px solid #cdc4e2; border-radius: 8px; background: #f5f1ff;
 }
-.default-model-card strong { display: block; margin-top: 5px; color: #403755; font-size: 11px; }
+.default-model-card strong { display: block; margin-top: 5px; color: #403755; font-size: 11px; overflow-wrap: anywhere; }
 .default-model-card p { margin: 5px 0 0; color: #7e758f; font-size: 9px; }
 
 .provider-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }

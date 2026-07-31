@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  defaultRoomToolNames,
+  createDefaultVoiceConfiguration,
   voiceTemplateInputSchema,
   type DefaultModelSelection,
   type NormalizedChatRequest,
@@ -53,6 +53,7 @@ export async function generateVoiceTemplate(input: {
   request: VoiceTemplateGenerationRequest;
   selection: DefaultModelSelection;
   provider: ModelProvider;
+  signal?: AbortSignal;
 }): Promise<VoiceTemplateInput> {
   const capabilities = await input.provider
     .getCapabilities(input.selection.modelId)
@@ -80,6 +81,7 @@ export async function generateVoiceTemplate(input: {
     reasoning: { enabled: false, displayMode: "hidden" },
     tools: [],
     sessionId: "voice-template-generator",
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
     ...(capabilities?.structuredOutput
       ? { structuredOutput: generatedFieldsJsonSchema }
       : {})
@@ -90,19 +92,10 @@ export async function generateVoiceTemplate(input: {
   }
   const generated = generatedFieldsSchema.parse(parseJsonObject(text));
   return voiceTemplateInputSchema.parse({
+    ...createDefaultVoiceConfiguration(),
     ...generated,
     name: input.request.name,
     provider: input.selection.provider,
     modelId: input.selection.modelId,
-    maxOutputTokens: 1_200,
-    reasoning: { enabled: true, effort: "medium", displayMode: "summary" },
-    tools: [...defaultRoomToolNames],
-    contextBudget: {
-      softLimitTokens: 120_000,
-      hardLimitTokens: 160_000,
-      recentTranscriptTokens: 70_000,
-      retrievedContextTokens: 24_000,
-      notebookTokens: 0
-    }
   });
 }

@@ -74,11 +74,16 @@ export const api = {
   },
 
   async generateVoiceTemplate(
-    input: VoiceTemplateGenerationRequest
+    input: VoiceTemplateGenerationRequest,
+    signal?: AbortSignal
   ): Promise<VoiceTemplateInput> {
     return (await requestJson<{ template: VoiceTemplateInput }>(
       "/api/v1/voice-templates/generate",
-      { method: "POST", body: JSON.stringify(input) }
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+        ...(signal === undefined ? {} : { signal })
+      }
     )).template;
   },
 

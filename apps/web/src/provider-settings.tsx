@@ -69,7 +69,7 @@ export function ProviderSettings() {
           <p>Credentials remain in the local environment and are never sent to the browser.</p>
         </div>
       </div>
-      <div className="default-model-card">
+      <div className="default-model-card" aria-live="polite">
         <div>
           <span className="eyebrow">Default fallback model</span>
           {defaultModel ? (
@@ -120,7 +120,7 @@ export function ProviderSettings() {
           </div>
         </header>
         {(error || settingsError) && (
-          <div className="settings-error">{settingsError ?? error}</div>
+          <div className="settings-error" role="alert">{settingsError ?? error}</div>
         )}
         <div className="catalog-list">
           {visible.slice(0, 100).map(model => (
@@ -137,11 +137,25 @@ export function ProviderSettings() {
                     ? "current"
                     : ""
                 }
-                disabled={savingDefaultId !== undefined}
+                disabled={
+                  savingDefaultId !== undefined ||
+                  !model.capabilities.textInput
+                }
+                aria-busy={savingDefaultId === model.id}
+                aria-label={
+                  !model.capabilities.textInput
+                    ? `${model.name} cannot be used as a text fallback`
+                    : defaultModel?.provider === selected &&
+                        defaultModel.modelId === model.id
+                      ? `${model.name} is the current default model`
+                      : `Set ${model.name} as the default model`
+                }
                 onClick={() => void chooseDefault(model.id)}
               >
                 {savingDefaultId === model.id
-                  ? <LoaderCircle size={12} className="spin" />
+                  ? <><LoaderCircle size={12} className="spin" /> Saving…</>
+                  : !model.capabilities.textInput
+                    ? "No text input"
                   : defaultModel?.provider === selected &&
                       defaultModel.modelId === model.id
                     ? "Default"

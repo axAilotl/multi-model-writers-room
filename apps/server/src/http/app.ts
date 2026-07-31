@@ -107,9 +107,16 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
         return;
       }
       const models = await provider.listModels();
-      if (!models.some(model => model.id === selection.modelId)) {
+      const model = models.find(candidate => candidate.id === selection.modelId);
+      if (!model) {
         response.status(400).json({
           error: `Model is not available from ${selection.provider}: ${selection.modelId}`
+        });
+        return;
+      }
+      if (!model.capabilities.textInput) {
+        response.status(400).json({
+          error: `Model cannot accept text input: ${selection.modelId}`
         });
         return;
       }
@@ -148,13 +155,39 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
         });
         return;
       }
-      response.json({
-        template: await generateVoiceTemplate({
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, 90_000);
+      const abortDisconnectedRequest = () => {
+        if (!response.writableEnded) controller.abort();
+      };
+      request.once("aborted", abortDisconnectedRequest);
+      response.once("close", abortDisconnectedRequest);
+      try {
+        const template = await generateVoiceTemplate({
           request: generationRequest,
           selection,
-          provider
-        })
-      });
+          provider,
+          signal: controller.signal
+        });
+        if (!controller.signal.aborted) {
+          response.json({ template });
+        } else if (timedOut && !response.headersSent && !response.destroyed) {
+          response.status(504).json({ error: "Voice generation timed out" });
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+        if (timedOut && !response.headersSent && !response.destroyed) {
+          response.status(504).json({ error: "Voice generation timed out" });
+        }
+      } finally {
+        clearTimeout(timeout);
+        request.off("aborted", abortDisconnectedRequest);
+        response.off("close", abortDisconnectedRequest);
+      }
     })
   );
 

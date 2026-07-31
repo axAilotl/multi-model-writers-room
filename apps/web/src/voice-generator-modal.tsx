@@ -6,6 +6,7 @@ import type {
 } from "@writers-room/contracts";
 import { api } from "./api.js";
 import { providerLabels } from "./provider-labels.js";
+import { useModalFocus } from "./use-modal-focus.js";
 
 export function VoiceGeneratorModal({
   defaultModel,
@@ -20,56 +21,38 @@ export function VoiceGeneratorModal({
   const [sourceText, setSourceText] = useState("");
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string>();
-  const dialogRef = useRef<HTMLFormElement>(null);
-  const nameRef = useRef<HTMLInputElement>(null);
+  const activeRequestRef = useRef<AbortController | undefined>(undefined);
+  const {
+    dialogRef,
+    initialFocusRef: nameRef
+  } = useModalFocus<HTMLFormElement, HTMLInputElement>({ onClose });
 
-  useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : undefined;
-    nameRef.current?.focus();
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(
-        dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        ) ?? []
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0]!;
-      const last = focusable[focusable.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previouslyFocused?.focus();
-    };
-  }, [onClose]);
+  useEffect(() => () => {
+    activeRequestRef.current?.abort();
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    activeRequestRef.current?.abort();
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
     setGenerating(true);
     setError(undefined);
     try {
-      onGenerated(await api.generateVoiceTemplate({ name, sourceText }));
+      const template = await api.generateVoiceTemplate(
+        { name, sourceText },
+        controller.signal
+      );
+      if (!controller.signal.aborted) onGenerated(template);
     } catch (errorValue) {
-      setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+      if (!controller.signal.aborted) {
+        setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+      }
     } finally {
-      setGenerating(false);
+      if (!controller.signal.aborted) setGenerating(false);
+      if (activeRequestRef.current === controller) {
+        activeRequestRef.current = undefined;
+      }
     }
   }
 
@@ -145,7 +128,12 @@ export function VoiceGeneratorModal({
           </button>
           <button
             className="primary-button"
-            disabled={generating || !name.trim() || sourceText.trim().length < 20}
+            disabled={
+              generating ||
+              defaultModel === undefined ||
+              !name.trim() ||
+              sourceText.trim().length < 20
+            }
           >
             {generating
               ? <LoaderCircle size={15} className="spin" />
