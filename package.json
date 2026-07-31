@@ -16,6 +16,7 @@
     "lint": "npm run typecheck",
     "start": "node --env-file-if-exists=.env apps/server/dist/main.js",
     "test": "vitest run && npm run test:web-dev",
+    "test:browser": "npm run build && node --env-file-if-exists=.env scripts/browser-e2e.mjs",
     "test:web-dev": "node scripts/check-web-dev.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc -p packages/contracts/tsconfig.json --noEmit && tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
@@ -24,6 +25,7 @@
     "@types/node": "^24.0.0",
     "concurrently": "^9.2.0",
     "jsdom": "30.0.1",
+    "playwright": "^1.62.1",
     "typescript": "^5.9.0",
     "vitest": "^4.0.0"
   },
