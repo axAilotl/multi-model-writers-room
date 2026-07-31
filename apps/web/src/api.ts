@@ -9,6 +9,7 @@ import type {
   VoiceTemplateInput,
   VoiceTemplatePatch,
   VoiceTemplateGenerationRequest,
+  WorkspaceArtifact,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
 
@@ -142,6 +143,12 @@ export const api = {
     })).room;
   },
 
+  async deleteRoom(roomId: string): Promise<void> {
+    await requestJson(`/api/v1/rooms/${encodeURIComponent(roomId)}`, {
+      method: "DELETE"
+    });
+  },
+
   snapshot(roomId: string): Promise<RoomSnapshot> {
     return requestJson(`/api/v1/rooms/${roomId}`);
   },
@@ -204,6 +211,23 @@ export const api = {
       body,
       signal: AbortSignal.timeout(INGESTION_TIMEOUT_MS)
     });
+  },
+
+  async retryArtifact(roomId: string, artifactId: string): Promise<WorkspaceArtifact> {
+    return (await requestJson<{ artifact: WorkspaceArtifact }>(
+      `/api/v1/rooms/${roomId}/artifacts/${artifactId}/retry`,
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(INGESTION_TIMEOUT_MS)
+      }
+    )).artifact;
+  },
+
+  async deleteArtifact(roomId: string, artifactId: string): Promise<void> {
+    await requestJson(
+      `/api/v1/rooms/${roomId}/artifacts/${artifactId}`,
+      { method: "DELETE" }
+    );
   },
 
   async search(roomId: string, query: string): Promise<WorkspaceSearchResult[]> {

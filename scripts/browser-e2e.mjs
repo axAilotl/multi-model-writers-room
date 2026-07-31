@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
@@ -100,7 +101,23 @@ try {
     dataRoot,
     host: "127.0.0.1",
     port: 0,
-    providers: new Map([["openrouter", browserProvider]])
+    providers: new Map([["openrouter", browserProvider]]),
+    workspaceModels: {
+      embeddings: {
+        dimensions: 2,
+        async embedDocuments(texts) {
+          return texts.map(() => new Float32Array([1, 0]));
+        },
+        async embedQuery() {
+          return new Float32Array([1, 0]);
+        }
+      },
+      housekeeping: {
+        async summarize(input) {
+          return { summary: `${input.filename} is browser-test evidence.` };
+        }
+      }
+    }
   });
   const address = runtime.address();
   assert.ok(address, "Browser test server did not bind");
@@ -121,6 +138,101 @@ try {
   await page.getByRole("textbox").fill("Browser verification room");
   await page.getByRole("button", { name: "Create room" }).click();
   await page.getByRole("heading", { name: "Browser verification room" }).waitFor();
+
+  await page.getByRole("button", { name: "Manage rooms" }).click();
+  const roomsDialog = page.getByRole("dialog", { name: "Rooms" });
+  await roomsDialog.getByLabel("Create a room").fill("Archive room");
+  await roomsDialog.getByRole("button", { name: "Create room" }).click();
+  await page.getByRole("heading", { name: "Archive room" }).waitFor();
+  await page.getByRole("button", { name: "Manage rooms" }).click();
+  await page.getByRole("button", { name: "Switch to Browser verification room" }).click();
+  await page.getByRole("heading", { name: "Browser verification room" }).waitFor();
+
+  await page.locator(".left-panel").evaluate(element => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(
+      ["# Dragged evidence\n\nThe workspace table accepts dropped Markdown files."],
+      "dragged-evidence.md",
+      { type: "text/markdown" }
+    ));
+    for (const type of ["dragenter", "dragover", "drop"]) {
+      element.dispatchEvent(new DragEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer
+      }));
+    }
+  });
+  await page.getByText("dragged-evidence.md", { exact: true }).waitFor({ timeout: 30_000 });
+  const draggedArtifactRow = page.locator(".artifact").filter({
+    hasText: "dragged-evidence.md"
+  });
+  await draggedArtifactRow.getByText("ready", { exact: true }).waitFor({ timeout: 30_000 });
+  await page.getByPlaceholder("Search the table").fill("workspace table accepts");
+  await page.getByPlaceholder("Search the table").press("Enter");
+  const draggedSearchResult = page.locator(".search-result").filter({
+    hasText: "dragged-evidence.md"
+  });
+  await draggedSearchResult.waitFor();
+
+  const workspaceRoom = runtime.store.listRooms().find(room =>
+    room.title === "Browser verification room"
+  );
+  assert.ok(workspaceRoom, "Browser room was not persisted");
+  const retryBytes = Buffer.from(
+    "Retryable evidence remains available in its content-addressed blob."
+  );
+  const retryHash = createHash("sha256").update(retryBytes).digest("hex");
+  const retryNow = new Date().toISOString();
+  const failedArtifact = {
+    id: "browser-failed-artifact",
+    roomId: workspaceRoom.id,
+    filename: "retry-evidence.txt",
+    mediaType: "text/plain",
+    sha256: retryHash,
+    byteSize: retryBytes.byteLength,
+    sourceType: "upload",
+    summary: "Ingestion failed before extraction.",
+    ingestionStatus: "failed",
+    ingestionStage: "failed",
+    error: "Transient ingestion failure",
+    createdAt: retryNow,
+    updatedAt: retryNow
+  };
+  await mkdir(join(dataRoot, "blobs", retryHash.slice(0, 2)), { recursive: true });
+  await writeFile(join(dataRoot, "blobs", retryHash.slice(0, 2), retryHash), retryBytes);
+  runtime.store.database.prepare(`
+    INSERT INTO artifacts(id, room_id, sha256, payload_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    failedArtifact.id,
+    failedArtifact.roomId,
+    failedArtifact.sha256,
+    JSON.stringify(failedArtifact),
+    failedArtifact.createdAt,
+    failedArtifact.updatedAt
+  );
+  runtime.store.appendRoomEvent(workspaceRoom.id, {
+    type: "artifact.updated",
+    artifact: failedArtifact
+  });
+  const retryArtifactRow = page.locator(".artifact").filter({
+    hasText: "retry-evidence.txt"
+  });
+  await retryArtifactRow.waitFor();
+  await retryArtifactRow.getByRole("button", {
+    name: "Retry retry-evidence.txt"
+  }).click();
+  await retryArtifactRow.getByText("ready", { exact: true }).waitFor({ timeout: 30_000 });
+
+  await draggedArtifactRow.getByRole("button", {
+    name: "Delete dragged-evidence.md"
+  }).click();
+  await draggedArtifactRow.getByRole("group", {
+    name: "Delete dragged-evidence.md?"
+  }).getByRole("button", { name: "Confirm" }).click();
+  await draggedArtifactRow.waitFor({ state: "detached" });
+  await draggedSearchResult.waitFor({ state: "detached" });
 
   await page.getByRole("button", { name: "Open settings" }).click();
   await page.getByRole("button", { name: "Providers & models" }).click();
@@ -256,6 +368,10 @@ try {
     path: join(evidenceRoot, "settings-during-generation.png"),
     fullPage: true
   });
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await page.getByRole("button", { name: "Manage rooms" }).click();
+  await page.getByRole("button", { name: "Switch to Archive room" }).click();
+  await page.getByRole("heading", { name: "Archive room" }).waitFor();
   releaseParticipantResponse();
   await waitForCondition(
     () => runtime.store.getSnapshot(browserRoom.id).generations.some(
@@ -268,7 +384,10 @@ try {
     generation => generation.status === "complete"
   )?.finalText.trim();
   assert.ok(completedReply, "The completed generation persisted no response text");
-  await page.getByRole("button", { name: "Close settings" }).click();
+  await page.getByRole("heading", { name: "Archive room" }).waitFor();
+  await page.getByRole("button", { name: "Manage rooms" }).click();
+  await page.getByRole("button", { name: "Switch to Browser verification room" }).click();
+  await page.getByRole("heading", { name: "Browser verification room" }).waitFor();
   const renderedReply = page.locator(".agent-message .message-copy").filter({
     hasText: completedReply.slice(0, 120)
   });
@@ -294,6 +413,24 @@ try {
     fullPage: true
   });
 
+  await page.locator(".agent-message .tail-actions")
+    .getByRole("button", { name: "Remove" }).click();
+  await page.locator(".agent-message").waitFor({ state: "detached" });
+  assert.match(
+    await page.locator(".room-meter > div i").getAttribute("style"),
+    /width:\s*0%/,
+    "Room pressure did not reset after deleting the last agent message"
+  );
+
+  await page.getByRole("button", { name: "Manage rooms" }).click();
+  await page.getByRole("button", { name: "Switch to Archive room" }).click();
+  await page.getByRole("heading", { name: "Archive room" }).waitFor();
+  await page.getByRole("button", { name: "Manage rooms" }).click();
+  await page.getByRole("button", { name: "Delete room Archive room" }).click();
+  await page.getByRole("group", { name: "Delete Archive room?" })
+    .getByRole("button", { name: "Confirm delete" }).click();
+  await page.getByRole("heading", { name: "Browser verification room" }).waitFor();
+
   const bodyMetrics = await page.locator("body").evaluate(element => ({
     textLength: element.innerText.trim().length,
     horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth + 2
@@ -312,6 +449,13 @@ try {
     requiredFieldWarning: true,
     settingsAvailableDuringGeneration: true,
     realConversationCompleted: true,
+    roomsCreated: 2,
+    roomSwitchSurvivedPriorGeneration: true,
+    roomsDeleted: 1,
+    roomPressureReset: true,
+    workspaceDragDropUploaded: true,
+    workspaceArtifactRetried: true,
+    workspaceArtifactDeleted: true,
     consoleErrors: 0,
     pageErrors: 0,
     failedApiResponses: 0,

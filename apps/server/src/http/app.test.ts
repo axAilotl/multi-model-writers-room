@@ -141,6 +141,32 @@ class UnavailableCapabilitiesProvider extends FixtureProvider {
   }
 }
 
+class AbortableGenerationProvider extends FixtureProvider {
+  readonly started: Promise<void>;
+  private markStarted!: () => void;
+
+  constructor() {
+    super();
+    this.started = new Promise(resolve => {
+      this.markStarted = resolve;
+    });
+  }
+
+  override async *streamChat(
+    request: NormalizedChatRequest
+  ): AsyncIterable<NormalizedGenerationEvent> {
+    this.markStarted();
+    const signal = request.signal;
+    if (!signal) throw new Error("Expected generation abort signal");
+    await new Promise<void>((_resolve, reject) => {
+      const abort = () => reject(new DOMException("aborted", "AbortError"));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+    yield { type: "done", finishReason: "stop" };
+  }
+}
+
 const roots: string[] = [];
 
 afterEach(() => {
@@ -674,6 +700,85 @@ describe("local HTTP room seam", () => {
     expect(store.getSnapshot(secondRoom.id).agents).toMatchObject([
       { id: agent.id, name: agent.name }
     ]);
+    store.close();
+  });
+
+  it("deletes a room without deleting the user's other rooms", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const deletedRoom = store.createRoom({ title: "Delete me" });
+    const remainingRoom = store.createRoom({ title: "Keep me" });
+
+    const deleted = await request(application)
+      .delete(`/api/v1/rooms/${deletedRoom.id}`)
+      .expect(200);
+
+    expect(deleted.body).toMatchObject({
+      deleted: true,
+      room: { id: deletedRoom.id, title: "Delete me" }
+    });
+    await request(application)
+      .get(`/api/v1/rooms/${deletedRoom.id}`)
+      .expect(404);
+    const listed = await request(application)
+      .get("/api/v1/rooms")
+      .expect(200);
+    expect(listed.body.rooms).toMatchObject([
+      { id: remainingRoom.id, title: "Keep me" }
+    ]);
+    store.close();
+  });
+
+  it("interrupts an active generation before deleting its room", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const provider = new AbortableGenerationProvider();
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", provider]]),
+      automaticScheduling: false
+    });
+    const room = store.createRoom({ title: "Delete while speaking" });
+    const agent = {
+      id: "systems",
+      name: "Systems Engineer",
+      description: "Finds durable architectural seams.",
+      provider: "openrouter" as const,
+      modelId: "fixture/model",
+      systemPrompt: "Advance the design with concrete architecture.",
+      temperature: 0.5,
+      maxOutputTokens: 600,
+      reasoning: { enabled: true, displayMode: "summary" as const },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 12_000,
+        hardLimitTokens: 16_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    };
+    store.addAgent(room.id, agent);
+
+    const speaking = request(application)
+      .post(`/api/v1/rooms/${room.id}/speakers/${agent.id}`)
+      .send({})
+      .then(response => response);
+    await provider.started;
+    const deleted = await request(application)
+      .delete(`/api/v1/rooms/${room.id}`);
+    const interrupted = await speaking;
+
+    expect(deleted.status).toBe(200);
+    expect(interrupted.status).toBe(201);
+    expect(interrupted.body.generation.status).toBe("interrupted");
+    await request(application).get(`/api/v1/rooms/${room.id}`).expect(404);
     store.close();
   });
 });

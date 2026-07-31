@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
 import { join } from "node:path";
 import type {
   ArtifactChunk,
@@ -125,6 +131,47 @@ export class WorkspaceService {
     return this.repository.listArtifacts(roomId);
   }
 
+  async retryArtifact(roomId: string, artifactId: string): Promise<WorkspaceArtifact> {
+    const artifact = this.getArtifactForRoom(roomId, artifactId);
+    if (artifact.ingestionStatus !== "failed") {
+      throw new Error("Only failed artifacts can be retried");
+    }
+    const path = this.blobPath(artifact.sha256);
+    if (!existsSync(path)) throw new Error("The original file is no longer available");
+    const bytes = readFileSync(path);
+    this.repository.deleteArtifact(artifact.id);
+    return this.ingest({
+      roomId,
+      filename: artifact.filename,
+      mediaType: artifact.mediaType,
+      bytes
+    });
+  }
+
+  deleteArtifact(roomId: string, artifactId: string): WorkspaceArtifact {
+    const artifact = this.getArtifactForRoom(roomId, artifactId);
+    this.repository.deleteArtifact(artifact.id);
+    this.garbageCollectBlobs([artifact.sha256]);
+    this.options.store.appendRoomEvent(roomId, {
+      type: "artifact.deleted",
+      artifactId: artifact.id
+    });
+    return artifact;
+  }
+
+  garbageCollectBlobs(sha256Hashes: Iterable<string>): void {
+    for (const sha256 of new Set(sha256Hashes)) {
+      if (!/^[a-f0-9]{64}$/.test(sha256)) continue;
+      if (this.repository.isHashReferenced(sha256)) continue;
+      const path = join(this.blobsRoot, sha256.slice(0, 2), sha256);
+      try {
+        if (existsSync(path)) unlinkSync(path);
+      } catch (error) {
+        console.error(`Failed to remove orphaned workspace blob ${sha256}`, error);
+      }
+    }
+  }
+
   listChunks(artifactId: string): ArtifactChunk[] {
     return this.repository.listChunks(artifactId);
   }
@@ -238,9 +285,14 @@ export class WorkspaceService {
   }
 
   private writeBlob(sha256: string, bytes: Buffer): void {
+    const path = this.blobPath(sha256);
     const directory = join(this.blobsRoot, sha256.slice(0, 2));
-    const path = join(directory, sha256);
     mkdirSync(directory, { recursive: true });
     if (!existsSync(path)) writeFileSync(path, bytes, { flag: "wx" });
+  }
+
+  private blobPath(sha256: string): string {
+    if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error("Invalid workspace blob hash");
+    return join(this.blobsRoot, sha256.slice(0, 2), sha256);
   }
 }

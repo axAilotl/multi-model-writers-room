@@ -157,4 +157,60 @@ describe("RoomStore public room seam", () => {
     ]);
     reopened.close();
   });
+
+  it("deletes a room whose generation cites a workspace chunk", () => {
+    const store = makeStore();
+    const room = store.createRoom({ title: "Cited workspace room" });
+    const agent: AgentDefinition = {
+      id: "citing-agent",
+      name: "Citing Agent",
+      description: "Uses workspace evidence.",
+      provider: "ollama",
+      modelId: "fixture",
+      systemPrompt: "Cite retrieved evidence.",
+      temperature: 0.5,
+      maxOutputTokens: 256,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 2_000,
+        hardLimitTokens: 4_000,
+        recentTranscriptTokens: 1_000,
+        retrievedContextTokens: 500,
+        notebookTokens: 0
+      }
+    };
+    store.addAgent(room.id, agent);
+    const message = store.appendMessage({
+      roomId: room.id,
+      authorType: "agent",
+      authorId: agent.id,
+      content: "The evidence supports this.",
+      generationId: "cited-generation"
+    });
+    store.createGeneration({
+      id: "cited-generation",
+      roomId: room.id,
+      messageId: message.id,
+      agent
+    });
+    const now = new Date().toISOString();
+    store.database.prepare(`
+      INSERT INTO artifacts(id, room_id, sha256, payload_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run("artifact-1", room.id, "hash-1", "{}", now, now);
+    store.database.prepare(`
+      INSERT INTO artifact_chunks(id, artifact_id, ordinal, text, payload_json)
+      VALUES (?, ?, ?, ?, ?)
+    `).run("chunk-1", "artifact-1", 0, "Evidence", "{}");
+    store.recordCitations({
+      generationId: "cited-generation",
+      messageId: message.id,
+      chunkIds: ["chunk-1"]
+    });
+
+    expect(() => store.deleteRoom(room.id)).not.toThrow();
+    expect(store.listRooms()).toEqual([]);
+    store.close();
+  });
 });

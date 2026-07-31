@@ -254,6 +254,24 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     response.json({ room });
   });
 
+  application.delete(
+    "/api/v1/rooms/:roomId",
+    asyncRoute(async (request, response) => {
+      const roomId = String(request.params.roomId);
+      const current = options.store.getRoom(roomId);
+      if (current.status !== "paused") {
+        options.store.updateRoom(roomId, { status: "paused" });
+      }
+      await engine.interruptRoomAndWait(roomId);
+      const artifactHashes = options.workspace
+        ?.listArtifacts(roomId)
+        .map(artifact => artifact.sha256) ?? [];
+      const room = options.store.deleteRoom(roomId);
+      options.workspace?.garbageCollectBlobs(artifactHashes);
+      response.json({ deleted: true, room });
+    })
+  );
+
   application.post(
     "/api/v1/rooms/:roomId/agents",
     asyncRoute(async (request, response) => {
@@ -318,10 +336,14 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       options.store.listAgents(room.id).length > 0
     ) {
       void scheduler.runFromHumanMessage(room.id, message.id).catch(error => {
-        options.store.appendRoomEvent(room.id, {
-          type: "system.error",
-          message: error instanceof Error ? error.message : String(error)
-        });
+        try {
+          options.store.appendRoomEvent(room.id, {
+            type: "system.error",
+            message: error instanceof Error ? error.message : String(error)
+          });
+        } catch {
+          // The room may have been deleted while activation was in progress.
+        }
       });
     }
   });
@@ -431,6 +453,28 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
         });
         response.status(201).json({ artifact });
       })
+    );
+
+    application.post(
+      "/api/v1/rooms/:roomId/artifacts/:artifactId/retry",
+      asyncRoute(async (request, response) => {
+        const artifact = await options.workspace!.retryArtifact(
+          String(request.params.roomId),
+          String(request.params.artifactId)
+        );
+        response.json({ artifact });
+      })
+    );
+
+    application.delete(
+      "/api/v1/rooms/:roomId/artifacts/:artifactId",
+      (request, response) => {
+        const artifact = options.workspace!.deleteArtifact(
+          String(request.params.roomId),
+          String(request.params.artifactId)
+        );
+        response.json({ deleted: true, artifact });
+      }
     );
 
     application.get(

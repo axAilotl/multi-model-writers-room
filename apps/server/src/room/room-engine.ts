@@ -17,6 +17,7 @@ interface ActiveGeneration {
   roomId: string;
   agentId: string;
   controller: AbortController;
+  completion: Promise<void>;
 }
 
 export class RoomEngine {
@@ -97,10 +98,15 @@ export class RoomEngine {
       agent: effectiveAgent
     });
     const controller = new AbortController();
+    let markComplete!: () => void;
+    const completion = new Promise<void>(resolve => {
+      markComplete = resolve;
+    });
     this.active.set(generationId, {
       roomId: input.roomId,
       agentId: effectiveAgent.id,
-      controller
+      controller,
+      completion
     });
     const startedAtMs = Date.now();
 
@@ -161,7 +167,8 @@ export class RoomEngine {
               generationId,
               callId: call.id,
               name: call.name,
-              arguments: call.arguments
+              arguments: call.arguments,
+              signal: controller.signal
             });
           } catch (error) {
             result = {
@@ -189,21 +196,22 @@ export class RoomEngine {
         }
       }
       const completedAt = new Date().toISOString();
-      generation = this.store.updateGeneration(generationId, {
-        ...generation,
-        status: "complete",
-        completedAt,
-        latencyMs: Date.now() - startedAtMs
-      });
-      this.store.recordCitations({
+      const citedChunkIds = this.store.recordCitations({
         generationId,
         messageId: message.id,
         chunkIds: generation.retrievedChunkIds
       });
+      generation = this.store.updateGeneration(generationId, {
+        ...generation,
+        retrievedChunkIds: citedChunkIds,
+        status: "complete",
+        completedAt,
+        latencyMs: Date.now() - startedAtMs
+      });
       const completeMessage = this.store.updateMessage(message.id, {
         content: generation.finalText,
         status: "complete",
-        citedChunkIds: generation.retrievedChunkIds
+        citedChunkIds
       });
       return { message: completeMessage, generation };
     } catch (error) {
@@ -226,6 +234,7 @@ export class RoomEngine {
       throw error;
     } finally {
       this.active.delete(generationId);
+      markComplete();
     }
   }
 
@@ -244,6 +253,26 @@ export class RoomEngine {
       interrupted += 1;
     }
     return interrupted;
+  }
+
+  async interruptRoomAndWait(
+    roomId: string,
+    timeoutMs = 5_000
+  ): Promise<number> {
+    const active = [...this.active.values()].filter(generation =>
+      generation.roomId === roomId
+    );
+    for (const generation of active) generation.controller.abort();
+    if (active.length > 0) {
+      await new Promise<void>(resolve => {
+        const timeout = setTimeout(resolve, timeoutMs);
+        void Promise.all(active.map(generation => generation.completion)).then(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    }
+    return active.length;
   }
 
   interruptAgent(roomId: string, agentId: string): number {

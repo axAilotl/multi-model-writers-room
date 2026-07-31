@@ -45,7 +45,12 @@ function requestBody<Result>(init?: RequestInit): Result {
 }
 
 class FakeWebSocket {
+  static instances: FakeWebSocket[] = [];
   onmessage?: () => void;
+
+  constructor(readonly url: string) {
+    FakeWebSocket.instances.push(this);
+  }
 
   close(): void {}
 }
@@ -53,6 +58,7 @@ class FakeWebSocket {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  FakeWebSocket.instances = [];
   Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
   document.body.replaceChildren();
 });
@@ -95,6 +101,68 @@ describe("App effect lifecycle", () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it("does not let a queued refresh restore the previous room while switching", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => {}
+    });
+    const archiveRoom = {
+      ...room,
+      id: "room-2",
+      title: "Archive room"
+    };
+    const archiveSnapshot = { ...snapshot, room: archiveRoom };
+    let releaseArchive!: () => void;
+    const archiveGate = new Promise<void>(resolve => {
+      releaseArchive = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      let payload: unknown;
+      if (path.endsWith("/api/v1/rooms")) {
+        payload = { rooms: [room, archiveRoom] };
+      } else if (path.endsWith(`/api/v1/rooms/${archiveRoom.id}`)) {
+        await archiveGate;
+        payload = archiveSnapshot;
+      } else {
+        payload = snapshot;
+      }
+      return new Response(JSON.stringify(payload), {
+        headers: { "content-type": "application/json" }
+      });
+    }));
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    const liveSocket = FakeWebSocket.instances.at(-1);
+    expect(liveSocket).toBeDefined();
+    await act(async () => liveSocket!.onmessage?.());
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Manage rooms"]'
+      )!.click();
+    });
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Switch to Archive room"]'
+      )!.click();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      releaseArchive();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    expect(document.querySelector("h1")?.textContent).toBe("Archive room");
+    await act(async () => root.unmount());
   });
 
   it("populates Add Voice from provider models and saved templates", async () => {

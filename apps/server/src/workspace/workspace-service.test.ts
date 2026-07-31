@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -202,7 +202,7 @@ describe("shared workspace seam", () => {
     store.close();
   });
 
-  it("retries a failed upload instead of returning the failed deduplication record", async () => {
+  it("retries a failed artifact from its stored blob and can delete the result", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-upload-retry-"));
     roots.push(root);
     const store = new RoomStore(join(root, "room.db"));
@@ -223,13 +223,16 @@ describe("shared workspace seam", () => {
     })).rejects.toThrow(/Unsupported artifact format/);
     const failed = workspace.listArtifacts(room.id)[0]!;
     expect(failed.ingestionStatus).toBe("failed");
-
-    const recovered = await workspace.ingest({
-      roomId: room.id,
+    const retryable = {
+      ...failed,
       filename: "recovered.txt",
-      mediaType: "text/plain",
-      bytes
-    });
+      mediaType: "text/plain"
+    };
+    store.database.prepare(
+      "UPDATE artifacts SET payload_json = ? WHERE id = ?"
+    ).run(JSON.stringify(retryable), failed.id);
+
+    const recovered = await workspace.retryArtifact(room.id, failed.id);
 
     expect(recovered).toMatchObject({
       filename: "recovered.txt",
@@ -237,6 +240,57 @@ describe("shared workspace seam", () => {
     });
     expect(recovered.id).not.toBe(failed.id);
     expect(workspace.listArtifacts(room.id)).toHaveLength(1);
+    const blobPath = join(root, "blobs", recovered.sha256.slice(0, 2), recovered.sha256);
+    expect(existsSync(blobPath)).toBe(true);
+
+    expect(workspace.deleteArtifact(room.id, recovered.id)).toMatchObject({
+      id: recovered.id,
+      filename: "recovered.txt"
+    });
+    expect(workspace.listArtifacts(room.id)).toEqual([]);
+    expect(existsSync(blobPath)).toBe(false);
+    store.close();
+  });
+
+  it("removes an orphaned blob only after its final room reference is deleted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-blob-gc-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const firstRoom = store.createRoom({ title: "First blob room" });
+    const secondRoom = store.createRoom({ title: "Second blob room" });
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: new FixtureEmbeddingModel(),
+      housekeeping
+    });
+    const bytes = Buffer.from("Shared evidence on the table.");
+    const firstArtifact = await workspace.ingest({
+      roomId: firstRoom.id,
+      filename: "shared.txt",
+      mediaType: "text/plain",
+      bytes
+    });
+    await workspace.ingest({
+      roomId: secondRoom.id,
+      filename: "shared.txt",
+      mediaType: "text/plain",
+      bytes
+    });
+    const blobPath = join(
+      root,
+      "blobs",
+      firstArtifact.sha256.slice(0, 2),
+      firstArtifact.sha256
+    );
+
+    store.deleteRoom(firstRoom.id);
+    workspace.garbageCollectBlobs([firstArtifact.sha256]);
+    expect(existsSync(blobPath)).toBe(true);
+
+    store.deleteRoom(secondRoom.id);
+    workspace.garbageCollectBlobs([firstArtifact.sha256]);
+    expect(existsSync(blobPath)).toBe(false);
     store.close();
   });
 });

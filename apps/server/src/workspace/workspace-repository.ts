@@ -75,6 +75,12 @@ export class WorkspaceRepository {
     return row ? artifactSchema.parse(JSON.parse(row.payload_json)) : undefined;
   }
 
+  isHashReferenced(sha256: string): boolean {
+    return this.store.database.prepare(
+      "SELECT 1 FROM artifacts WHERE sha256 = ? LIMIT 1"
+    ).get(sha256) !== undefined;
+  }
+
   insertArtifact(artifact: WorkspaceArtifact): WorkspaceArtifact {
     this.store.database.prepare(`
       INSERT INTO artifacts(id, room_id, sha256, payload_json, created_at, updated_at)
@@ -164,7 +170,18 @@ export class WorkspaceRepository {
   }
 
   deleteArtifact(artifactId: string): void {
-    this.store.database.prepare("DELETE FROM artifacts WHERE id = ?").run(artifactId);
+    this.store.database.transaction(() => {
+      this.store.database.prepare(`
+        DELETE FROM citations
+        WHERE chunk_id IN (
+          SELECT id FROM artifact_chunks WHERE artifact_id = ?
+        )
+      `).run(artifactId);
+      const result = this.store.database.prepare(
+        "DELETE FROM artifacts WHERE id = ?"
+      ).run(artifactId);
+      if (result.changes !== 1) throw new Error(`Artifact not found: ${artifactId}`);
+    })();
   }
 
   listArtifacts(roomId: string): WorkspaceArtifact[] {

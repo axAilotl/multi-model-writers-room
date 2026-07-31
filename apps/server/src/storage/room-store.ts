@@ -172,6 +172,29 @@ export class RoomStore {
     return next;
   }
 
+  deleteRoom(roomId: string): Room {
+    const room = this.getRoom(roomId);
+    this.database.transaction(() => {
+      this.database.prepare(`
+        DELETE FROM citations
+        WHERE generation_id IN (
+          SELECT id FROM generations WHERE room_id = ?
+        )
+      `).run(roomId);
+      const result = this.database.prepare(
+        "DELETE FROM rooms WHERE id = ?"
+      ).run(roomId);
+      if (result.changes !== 1) throw new Error(`Room not found: ${roomId}`);
+      this.database.prepare(`
+        DELETE FROM agents
+        WHERE NOT EXISTS (
+          SELECT 1 FROM room_agents WHERE room_agents.agent_id = agents.id
+        )
+      `).run();
+    })();
+    return room;
+  }
+
   addAgent(roomId: string, definition: AgentDefinition): AgentDefinition {
     this.getRoom(roomId);
     const agent = agentDefinitionSchema.parse(definition);
@@ -474,8 +497,8 @@ export class RoomStore {
     generationId: string;
     messageId: string;
     chunkIds: string[];
-  }): void {
-    if (input.chunkIds.length === 0) return;
+  }): string[] {
+    if (input.chunkIds.length === 0) return [];
     const generation = this.getGeneration(input.generationId);
     const message = this.getMessage(input.messageId);
     if (
@@ -492,7 +515,8 @@ export class RoomStore {
       WHERE c.id = ? AND a.room_id = ?
       ON CONFLICT(generation_id, chunk_id) DO NOTHING
     `);
-    this.database.transaction(() => {
+    return this.database.transaction(() => {
+      const recordedChunkIds: string[] = [];
       for (const chunkId of new Set(input.chunkIds)) {
         const result = insert.run(
           uuidv7(),
@@ -503,9 +527,15 @@ export class RoomStore {
           generation.roomId
         );
         if (result.changes !== 1) {
+          const stillExists = this.database.prepare(
+            "SELECT 1 FROM artifact_chunks WHERE id = ?"
+          ).get(chunkId) !== undefined;
+          if (!stillExists) continue;
           throw new Error(`Cited chunk does not belong to the generation room: ${chunkId}`);
         }
+        recordedChunkIds.push(chunkId);
       }
+      return recordedChunkIds;
     })();
   }
 

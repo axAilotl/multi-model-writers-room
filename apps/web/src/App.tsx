@@ -80,14 +80,18 @@ function generationFor(
   return snapshot.generations.find(generation => generation.id === message.generationId);
 }
 
-function MessageDetails({ generation }: {
+function MessageDetails({ generation, workspaceRevision }: {
   generation: GenerationRecord;
+  workspaceRevision: string;
 }) {
   const [open, setOpen] = useState(false);
   const [inspectionError, setInspectionError] = useState<string>();
   const [inspection, setInspection] = useState<Awaited<
     ReturnType<typeof api.inspectGeneration>
   >>();
+  useEffect(() => {
+    setInspection(undefined);
+  }, [workspaceRevision]);
   useEffect(() => {
     if (!open || inspection) return;
     let active = true;
@@ -107,7 +111,7 @@ function MessageDetails({ generation }: {
     return () => {
       active = false;
     };
-  }, [open, generation.id, inspection]);
+  }, [open, generation.id, inspection, workspaceRevision]);
   return (
     <div className="message-details">
       <button className="detail-toggle" onClick={() => setOpen(value => !value)}>
@@ -195,6 +199,9 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
 }) {
   const bottom = useRef<HTMLDivElement>(null);
   const messages = snapshot.messages.filter(message => message.lifecycle === "active");
+  const workspaceRevision = snapshot.artifacts
+    .map(artifact => `${artifact.id}:${artifact.updatedAt}`)
+    .join("|");
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
@@ -227,7 +234,12 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
               <div className="message-copy">
                 {message.content || <span className="thinking">Gathering a thought…</span>}
               </div>
-              {generation && <MessageDetails generation={generation} />}
+              {generation && (
+                <MessageDetails
+                  generation={generation}
+                  workspaceRevision={workspaceRevision}
+                />
+              )}
               {isTail && (
                 <div className="tail-actions">
                   <button onClick={onRegenerateTail} disabled={busy}>
@@ -254,18 +266,26 @@ function WorkspacePanel({ snapshot, onChanged }: {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<WorkspaceSearchResult[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [retryingId, setRetryingId] = useState<string>();
+  const [deletingId, setDeletingId] = useState<string>();
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string>();
   const [note, setNote] = useState("");
   const [error, setError] = useState<string>();
+  const dragDepth = useRef(0);
 
   function showError(errorValue: unknown) {
     setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
   }
 
-  async function upload(file: File) {
+  async function uploadFiles(files: File[]) {
+    if (files.length === 0) return;
     setUploading(true);
     setError(undefined);
     try {
-      await api.upload(snapshot.room.id, file);
+      for (const file of files) {
+        await api.upload(snapshot.room.id, file);
+      }
       await onChanged();
     } catch (errorValue) {
       showError(errorValue);
@@ -285,6 +305,36 @@ function WorkspacePanel({ snapshot, onChanged }: {
     }
   }
 
+  async function retryArtifact(artifactId: string) {
+    setRetryingId(artifactId);
+    setError(undefined);
+    try {
+      await api.retryArtifact(snapshot.room.id, artifactId);
+    } catch (errorValue) {
+      showError(errorValue);
+    } finally {
+      await onChanged().catch(showError);
+      setRetryingId(undefined);
+    }
+  }
+
+  async function deleteArtifact(artifactId: string) {
+    setDeletingId(artifactId);
+    setError(undefined);
+    try {
+      await api.deleteArtifact(snapshot.room.id, artifactId);
+      setResults(current => current.filter(result =>
+        result.artifact.id !== artifactId
+      ));
+      setConfirmingDeleteId(undefined);
+      await onChanged();
+    } catch (errorValue) {
+      showError(errorValue);
+    } finally {
+      setDeletingId(undefined);
+    }
+  }
+
   async function addNote(event: FormEvent) {
     event.preventDefault();
     if (!note.trim()) return;
@@ -299,7 +349,38 @@ function WorkspacePanel({ snapshot, onChanged }: {
   }
 
   return (
-    <aside className="left-panel">
+    <aside
+      className={`left-panel ${dragActive ? "drag-active" : ""}`}
+      onDragEnter={event => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        event.preventDefault();
+        dragDepth.current += 1;
+        setDragActive(true);
+      }}
+      onDragOver={event => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={event => {
+        event.preventDefault();
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragActive(false);
+      }}
+      onDrop={event => {
+        event.preventDefault();
+        dragDepth.current = 0;
+        setDragActive(false);
+        void uploadFiles(Array.from(event.dataTransfer.files));
+      }}
+    >
+      {dragActive && (
+        <div className="table-drop-overlay" role="status">
+          <Upload size={24} />
+          <strong>Drop files on the table</strong>
+          <span>Markdown, text, and PDF</span>
+        </div>
+      )}
       <div className="panel-title">
         <span><PanelLeft size={16} /> The table</span>
         <label className="icon-button upload-button" title="Upload document">
@@ -311,7 +392,7 @@ function WorkspacePanel({ snapshot, onChanged }: {
             onChange={event => {
               const input = event.currentTarget;
               const file = input.files?.[0];
-              if (file) void upload(file).finally(() => {
+              if (file) void uploadFiles([file]).finally(() => {
                 input.value = "";
               });
             }}
@@ -326,7 +407,7 @@ function WorkspacePanel({ snapshot, onChanged }: {
           onChange={event => setQuery(event.target.value)}
         />
       </form>
-      {error && <div className="settings-error">{error}</div>}
+      {error && <div className="settings-error" role="alert">{error}</div>}
       {results.length > 0 && (
         <div className="search-results">
           <div className="section-label">Search results</div>
@@ -347,18 +428,80 @@ function WorkspacePanel({ snapshot, onChanged }: {
             <span>Drop the first document on the table.</span>
           </div>
         )}
-        {snapshot.artifacts.map(artifact => (
-          <div className="artifact" key={artifact.id}>
-            <div className="file-icon"><FileText size={16} /></div>
-            <div>
-              <strong>{artifact.filename}</strong>
-              <span>{artifact.summary}</span>
-              <small className={`status-${artifact.ingestionStatus}`}>
-                {artifact.ingestionStatus}
-              </small>
+        {snapshot.artifacts.map(artifact => {
+          const retrying = retryingId === artifact.id;
+          const deleting = deletingId === artifact.id;
+          const busy = retryingId !== undefined || deletingId !== undefined;
+          const confirming = confirmingDeleteId === artifact.id;
+          return (
+            <div className="artifact" key={artifact.id}>
+              <div className="file-icon"><FileText size={16} /></div>
+              <div className="artifact-copy">
+                <strong>{artifact.filename}</strong>
+                <span>{artifact.error ?? artifact.summary}</span>
+                <small className={`status-${artifact.ingestionStatus}`}>
+                  {artifact.ingestionStatus}
+                </small>
+              </div>
+              {!confirming && (
+                <div className="artifact-actions">
+                  {artifact.ingestionStatus === "failed" && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={`Retry ${artifact.filename}`}
+                      title="Retry ingestion"
+                      disabled={busy}
+                      onClick={() => void retryArtifact(artifact.id)}
+                    >
+                      {retrying
+                        ? <LoaderCircle size={13} className="spin" />
+                        : <RotateCcw size={13} />}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-button danger-icon"
+                    aria-label={`Delete ${artifact.filename}`}
+                    title="Delete file"
+                    disabled={busy}
+                    onClick={() => setConfirmingDeleteId(artifact.id)}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              )}
+              {confirming && (
+                <div
+                  className="artifact-delete-confirmation"
+                  role="group"
+                  aria-label={`Delete ${artifact.filename}?`}
+                >
+                  <span>Remove this file, its index, and its citations?</span>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={deleting}
+                    onClick={() => setConfirmingDeleteId(undefined)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="danger-button"
+                    disabled={deleting}
+                    onClick={() => void deleteArtifact(artifact.id)}
+                  >
+                    {deleting
+                      ? <LoaderCircle size={13} className="spin" />
+                      : <Trash2 size={13} />}
+                    Confirm
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div className="scratchpad">
         <div className="section-label">
@@ -687,10 +830,238 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
       </div>
       <div className="room-meter">
         <span>Room pressure</span>
-        <div><i style={{ width: `${Math.min(100, snapshot.messages.filter(message => message.authorType === "agent").length * 8)}%` }} /></div>
+        <div><i style={{ width: `${Math.min(100, snapshot.messages.filter(message =>
+          message.authorType === "agent" && message.lifecycle === "active"
+        ).length * 8)}%` }} /></div>
         <small>Soft pacing protects the conversation from runaway loops.</small>
       </div>
     </aside>
+  );
+}
+
+function RoomManager({
+  rooms,
+  currentRoomId,
+  errorMessage,
+  onSwitch,
+  onCreate,
+  onDelete,
+  onClose
+}: {
+  rooms: Room[];
+  currentRoomId: string;
+  errorMessage?: string;
+  onSwitch: (roomId: string) => Promise<boolean>;
+  onCreate: (title: string) => Promise<boolean>;
+  onDelete: (roomId: string) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [switchingId, setSwitchingId] = useState<string>();
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string>();
+  const [deletingId, setDeletingId] = useState<string>();
+  const [error, setError] = useState<string>();
+  const operationPending = creating || switchingId !== undefined || deletingId !== undefined;
+  const operationPendingRef = useRef(false);
+  const dialogRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const handleDialogKeys = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (!operationPendingRef.current) onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) ?? []).filter(element => !element.hidden);
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable.at(-1)!;
+      if (!dialogRef.current?.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleDialogKeys);
+    return () => document.removeEventListener("keydown", handleDialogKeys);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!confirmingDeleteId) return;
+    const frame = window.requestAnimationFrame(() => {
+      dialogRef.current?.querySelector<HTMLButtonElement>(
+        ".room-delete-confirmation button"
+      )?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [confirmingDeleteId]);
+
+  async function create(event: FormEvent) {
+    event.preventDefault();
+    if (operationPendingRef.current) return;
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      setError("Enter a room name before creating it.");
+      return;
+    }
+    operationPendingRef.current = true;
+    setCreating(true);
+    setError(undefined);
+    try {
+      if (await onCreate(nextTitle)) onClose();
+    } finally {
+      operationPendingRef.current = false;
+      setCreating(false);
+    }
+  }
+
+  async function switchTo(roomId: string) {
+    if (operationPendingRef.current) return;
+    operationPendingRef.current = true;
+    setSwitchingId(roomId);
+    setError(undefined);
+    try {
+      if (await onSwitch(roomId)) onClose();
+    } finally {
+      operationPendingRef.current = false;
+      setSwitchingId(undefined);
+    }
+  }
+
+  async function remove(roomId: string) {
+    if (operationPendingRef.current) return;
+    operationPendingRef.current = true;
+    setDeletingId(roomId);
+    setError(undefined);
+    try {
+      const deleted = await onDelete(roomId);
+      if (deleted) {
+        setConfirmingDeleteId(undefined);
+        if (roomId === currentRoomId) onClose();
+      }
+    } finally {
+      operationPendingRef.current = false;
+      setDeletingId(undefined);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop room-manager-backdrop" onMouseDown={event => {
+      if (event.target === event.currentTarget && !operationPendingRef.current) onClose();
+    }}>
+      <section ref={dialogRef} className="room-manager-modal" role="dialog" aria-modal="true" aria-labelledby="rooms-heading">
+        <header>
+          <div>
+            <span className="eyebrow">Persistent workspaces</span>
+            <h2 id="rooms-heading">Rooms</h2>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => {
+              if (!operationPendingRef.current) onClose();
+            }}
+            aria-label="Close rooms"
+            disabled={operationPending}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <form className="room-create-form" onSubmit={create} noValidate>
+          <label>Create a room
+            <input
+              value={title}
+              onChange={event => {
+                setTitle(event.target.value);
+                setError(undefined);
+              }}
+              placeholder="Architecture workshop"
+              autoFocus
+            />
+          </label>
+          <button className="primary-button" disabled={operationPending}>
+            {creating ? <LoaderCircle size={14} className="spin" /> : <Plus size={14} />}
+            Create room
+          </button>
+        </form>
+        {(error ?? errorMessage) && (
+          <div className="settings-error" role="alert">
+            {error ?? errorMessage}
+          </div>
+        )}
+        <div className="room-list" aria-label="Existing rooms">
+          {rooms.map(room => {
+            const current = room.id === currentRoomId;
+            const confirming = confirmingDeleteId === room.id;
+            return (
+              <article className={current ? "current" : ""} key={room.id}>
+                <div className="room-list-copy">
+                  <strong>{room.title}</strong>
+                  <span>{current ? "Current room" : room.status === "paused" ? "Paused" : "Available"}</span>
+                </div>
+                {!confirming && (
+                  <div className="room-list-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={current || operationPending}
+                      onClick={() => void switchTo(room.id)}
+                      aria-label={`Switch to ${room.title}`}
+                    >
+                      {switchingId === room.id
+                        ? <LoaderCircle size={13} className="spin" />
+                        : <MessageSquareText size={13} />}
+                      {current ? "Current" : "Switch"}
+                    </button>
+                    <button
+                      type="button"
+                      className="danger-button"
+                      disabled={operationPending}
+                      onClick={() => setConfirmingDeleteId(room.id)}
+                      aria-label={`Delete room ${room.title}`}
+                    >
+                      <Trash2 size={13} /> Delete
+                    </button>
+                  </div>
+                )}
+                {confirming && (
+                  <div className="room-delete-confirmation" role="group" aria-label={`Delete ${room.title}?`}>
+                    <span>Delete this room and its transcript?</span>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={operationPending}
+                      onClick={() => setConfirmingDeleteId(undefined)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="danger-button"
+                      disabled={operationPending}
+                      onClick={() => void remove(room.id)}
+                    >
+                      {deletingId === room.id
+                        ? <LoaderCircle size={13} className="spin" />
+                        : <Trash2 size={13} />}
+                      Confirm delete
+                    </button>
+                  </div>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -721,29 +1092,42 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [showAgent, setShowAgent] = useState(false);
+  const [showRooms, setShowRooms] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const latestSequenceRef = useRef(0);
   const refreshRequestRef = useRef(0);
+  const activeRoomIdRef = useRef<string | undefined>(undefined);
+  const roomPickerRef = useRef<HTMLButtonElement>(null);
   latestSequenceRef.current = snapshot && snapshot.room.id === roomId
     ? snapshot.latestSequence
     : 0;
 
   const refresh = useCallback(async (selectedRoomId?: string) => {
+    const activeRoomIdAtStart = activeRoomIdRef.current;
+    if (
+      selectedRoomId !== undefined &&
+      selectedRoomId !== activeRoomIdAtStart
+    ) return;
     const requestId = ++refreshRequestRef.current;
-    const id = selectedRoomId ?? roomId;
+    const id = selectedRoomId ?? activeRoomIdAtStart;
     const nextRooms = await api.listRooms();
     const resolved = id ?? nextRooms[0]?.id;
     const nextSnapshot = resolved ? await api.snapshot(resolved) : undefined;
-    if (requestId !== refreshRequestRef.current) return;
+    if (
+      requestId !== refreshRequestRef.current ||
+      activeRoomIdRef.current !== activeRoomIdAtStart
+    ) return;
     setRooms(nextRooms);
     if (resolved && nextSnapshot) {
+      activeRoomIdRef.current = resolved;
       setRoomId(resolved);
       setSnapshot(nextSnapshot);
     } else {
+      activeRoomIdRef.current = undefined;
       setRoomId(undefined);
       setSnapshot(undefined);
     }
-  }, [roomId]);
+  }, []);
 
   useEffect(() => {
     void refresh().catch(errorValue => setError(String(errorValue)));
@@ -763,8 +1147,10 @@ export default function App() {
         `${protocol}//${location.host}/api/v1/rooms/${roomId}/stream?after=${latestSequenceRef.current}`
       );
       socket.onmessage = () => {
+        if (activeRoomIdRef.current !== roomId) return;
         window.clearTimeout(refreshTimer);
         refreshTimer = window.setTimeout(() => {
+          if (disposed || activeRoomIdRef.current !== roomId) return;
           void refresh(roomId).catch(errorValue => setError(String(errorValue)));
         }, 80);
       };
@@ -797,7 +1183,7 @@ export default function App() {
     setError(undefined);
     try {
       await action();
-      await refresh(roomId);
+      await refresh(activeRoomIdRef.current);
       return true;
     } catch (errorValue) {
       setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
@@ -807,21 +1193,58 @@ export default function App() {
     }
   }
 
-  async function createFirstRoom(title: string) {
+  async function createRoom(title: string): Promise<boolean> {
     setError(undefined);
     try {
       const room = await api.createRoom(title);
+      activeRoomIdRef.current = room.id;
       await refresh(room.id);
+      return true;
     } catch (errorValue) {
       setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+      return false;
     }
   }
+
+  async function switchRoom(nextRoomId: string): Promise<boolean> {
+    setError(undefined);
+    const previousRoomId = activeRoomIdRef.current;
+    activeRoomIdRef.current = nextRoomId;
+    try {
+      await refresh(nextRoomId);
+      return true;
+    } catch (errorValue) {
+      activeRoomIdRef.current = previousRoomId;
+      setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+      return false;
+    }
+  }
+
+  async function deleteRoom(deletedRoomId: string): Promise<boolean> {
+    setError(undefined);
+    try {
+      await api.deleteRoom(deletedRoomId);
+      if (activeRoomIdRef.current === deletedRoomId) {
+        activeRoomIdRef.current = undefined;
+      }
+      await refresh(activeRoomIdRef.current);
+      return true;
+    } catch (errorValue) {
+      setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+      return false;
+    }
+  }
+
+  const closeRoomManager = useCallback(() => {
+    setShowRooms(false);
+    window.setTimeout(() => roomPickerRef.current?.focus(), 0);
+  }, []);
 
   if (!snapshot) {
     return (
       <>
         <EmptyRoom onCreate={title => {
-          void createFirstRoom(title);
+          void createRoom(title);
         }} />
         {error && <div className="toast error-toast">{error}</div>}
       </>
@@ -833,13 +1256,20 @@ export default function App() {
       <header className="topbar">
         <div className="brand"><MessageSquareText size={18} /><span>Writers’ Room</span></div>
         <div className="room-switcher">
-          <select
-            value={roomId}
-            onChange={event => void refresh(event.target.value)
-              .catch(errorValue => setError(String(errorValue)))}
+          <button
+            ref={roomPickerRef}
+            type="button"
+            className="room-picker-button"
+            onClick={() => {
+              setError(undefined);
+              setShowRooms(true);
+            }}
+            aria-label="Manage rooms"
           >
-            {rooms.map(room => <option key={room.id} value={room.id}>{room.title}</option>)}
-          </select>
+            <MessageSquareText size={14} />
+            <span>{snapshot.room.title}</span>
+            <ChevronDown size={14} />
+          </button>
           <span className={`room-status ${snapshot.room.status}`} />
         </div>
         <div className="top-controls">
@@ -890,7 +1320,11 @@ export default function App() {
       </header>
 
       <div className="room-grid">
-        <WorkspacePanel snapshot={snapshot} onChanged={() => refresh(roomId)} />
+        <WorkspacePanel
+          key={snapshot.room.id}
+          snapshot={snapshot}
+          onChanged={() => refresh(roomId)}
+        />
         <main className="center-panel">
           <div className="conversation-heading">
             <div>
@@ -957,6 +1391,17 @@ export default function App() {
           onAdded={() => void refresh(roomId)
             .catch(errorValue => setError(String(errorValue)))}
           onClose={() => setShowAgent(false)}
+        />
+      )}
+      {showRooms && (
+        <RoomManager
+          rooms={rooms}
+          currentRoomId={snapshot.room.id}
+          {...(error === undefined ? {} : { errorMessage: error })}
+          onSwitch={switchRoom}
+          onCreate={createRoom}
+          onDelete={deleteRoom}
+          onClose={closeRoomManager}
         />
       )}
       {showSettings && (

@@ -12,7 +12,11 @@ import { createHttpApplication } from "./http/app.js";
 import { LocalModelWorker } from "./ml/local-models.js";
 import { RoomStore } from "./storage/room-store.js";
 import { RoomToolExecutor } from "./tools/room-tools.js";
-import { WorkspaceService } from "./workspace/workspace-service.js";
+import {
+  WorkspaceService,
+  type EmbeddingModel,
+  type HousekeepingModel
+} from "./workspace/workspace-service.js";
 
 export interface WritersRoomRuntime {
   server: Server;
@@ -100,6 +104,10 @@ export async function startRuntime(input?: {
   host?: string;
   port?: number;
   providers?: ReadonlyMap<string, ModelProvider>;
+  workspaceModels?: {
+    embeddings: EmbeddingModel;
+    housekeeping: HousekeepingModel;
+  };
 }): Promise<WritersRoomRuntime> {
   const dataRoot = resolve(
     input?.dataRoot ??
@@ -111,8 +119,8 @@ export async function startRuntime(input?: {
   const workspace = new WorkspaceService({
     store,
     dataRoot,
-    embeddings: localModels,
-    housekeeping: localModels
+    embeddings: input?.workspaceModels?.embeddings ?? localModels,
+    housekeeping: input?.workspaceModels?.housekeeping ?? localModels
   });
   const tools = new RoomToolExecutor(store, workspace);
   const app = createHttpApplication({

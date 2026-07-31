@@ -381,6 +381,7 @@ export type RoomStreamEvent =
   | { sequence: number; type: "generation.updated"; generation: GenerationRecord }
   | { sequence: number; type: "runtime.updated"; runtime: AgentRuntimeState }
   | { sequence: number; type: "artifact.updated"; artifact: WorkspaceArtifact }
+  | { sequence: number; type: "artifact.deleted"; artifactId: string }
   | { sequence: number; type: "scratchpad.updated"; note: SharedNote }
   | { sequence: number; type: "activation.recorded"; agentId: string; decision: ActivationDecision; score: number }
   | { sequence: number; type: "system.error"; message: string };

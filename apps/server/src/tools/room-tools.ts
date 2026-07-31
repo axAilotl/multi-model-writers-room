@@ -22,7 +22,22 @@ export interface ToolExecutor {
     callId: string;
     name: string;
     arguments: string;
+    signal: AbortSignal;
   }): Promise<ToolExecutionResult>;
+}
+
+function withAbort<Result>(
+  operation: Promise<Result>,
+  signal: AbortSignal
+): Promise<Result> {
+  if (signal.aborted) return Promise.reject(new DOMException("aborted", "AbortError"));
+  return new Promise<Result>((resolve, reject) => {
+    const abort = () => reject(new DOMException("aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    void operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", abort);
+    });
+  });
 }
 
 const schemas = {
@@ -112,7 +127,9 @@ export class RoomToolExecutor implements ToolExecutor {
     callId: string;
     name: string;
     arguments: string;
+    signal: AbortSignal;
   }): Promise<ToolExecutionResult> {
+    input.signal.throwIfAborted();
     const schema = schemas[input.name as ToolName];
     if (!schema) throw new Error(`Unknown or unauthorized room tool: ${input.name}`);
     const definitionAllowed = this.definitions(
@@ -132,7 +149,7 @@ export class RoomToolExecutor implements ToolExecutor {
       arguments: args
     });
     try {
-      const result = await this.dispatch(input, args);
+      const result = await withAbort(this.dispatch(input, args), input.signal);
       this.store.completeToolCall({ id: recordId, result });
       return result;
     } catch (error) {
