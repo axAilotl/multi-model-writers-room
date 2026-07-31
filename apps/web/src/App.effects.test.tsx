@@ -587,25 +587,34 @@ describe("App effect lifecycle", () => {
       ".settings-heading-actions button"
     )).find(button => button.textContent?.includes("New template"));
     await act(async () => newTemplate!.click());
-    const unsavedName = document.querySelector<HTMLInputElement>(
-      '.template-form input[placeholder="Systems Engineer"]'
+    const unsavedTitle = document.querySelector<HTMLInputElement>(
+      '.template-form input[name="title"]'
     );
     const unsavedModel = document.querySelector<HTMLInputElement>(
       '.template-form input[name="modelId"]'
     );
+    const unsavedSystemPrompt = document.querySelector<HTMLTextAreaElement>(
+      '.template-form textarea[name="systemPrompt"]'
+    );
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
-        ?.set?.call(unsavedName, "Missing Model");
-      unsavedName!.dispatchEvent(new Event("input", { bubbles: true }));
+        ?.set?.call(unsavedTitle, "");
+      unsavedTitle!.dispatchEvent(new Event("input", { bubbles: true }));
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
         ?.set?.call(unsavedModel, "");
       unsavedModel!.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")
+        ?.set?.call(unsavedSystemPrompt, "");
+      unsavedSystemPrompt!.dispatchEvent(new Event("input", { bubbles: true }));
     });
     const invalidCreate = Array.from(document.querySelectorAll<HTMLButtonElement>(
       ".template-form button"
     )).find(button => button.textContent?.includes("Create template"));
+    expect(invalidCreate?.disabled).toBe(false);
     await act(async () => invalidCreate!.click());
-    expect(document.body.textContent).toContain("Cannot save template: modelId");
+    expect(document.body.textContent).toContain(
+      "Cannot save template: Template title, Voice name, Model, and System prompt are required."
+    );
     expect(fetchMock.mock.calls.filter(([input, init]) =>
       String(input).endsWith("/api/v1/voice-templates") &&
       init?.method === "POST"
@@ -675,6 +684,118 @@ describe("App effect lifecycle", () => {
     });
     expect(document.querySelector(".settings-page")).toBeNull();
 
+    await act(async () => root.unmount());
+  });
+
+  it("opens settings and removes a participant while another participant is responding", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => {}
+    });
+    const agent = {
+      id: "systems",
+      name: "Systems Engineer",
+      description: "Finds durable seams.",
+      provider: "openrouter" as const,
+      modelId: "fixture/model",
+      systemPrompt: "Challenge the design.",
+      temperature: 0.5,
+      maxOutputTokens: 600,
+      reasoning: { enabled: false, displayMode: "hidden" as const },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 12_000,
+        hardLimitTokens: 16_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    };
+    let currentSnapshot = {
+      ...snapshot,
+      agents: [agent],
+      runtime: [{
+        roomId: room.id,
+        agentId: agent.id,
+        fatigue: 0,
+        activation: 0,
+        consecutiveTurns: 0,
+        muted: false
+      }]
+    };
+    let releaseSpeaker!: (response: Response) => void;
+    const speakerResponse = new Promise<Response>(resolve => {
+      releaseSpeaker = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith(`/speakers/${agent.id}`)) return speakerResponse;
+      if (path.endsWith(`/agents/${agent.id}`) && init?.method === "DELETE") {
+        currentSnapshot = { ...currentSnapshot, agents: [], runtime: [] };
+        return Promise.resolve(new Response(JSON.stringify({ removed: true, agent }), {
+          headers: { "content-type": "application/json" }
+        }));
+      }
+      const payload = path.endsWith("/api/v1/rooms")
+        ? { rooms: [room] }
+        : path.endsWith("/api/v1/voice-templates")
+          ? { templates: [] }
+          : path.includes("/api/v1/providers/openrouter/models")
+            ? { provider: "openrouter", models: [] }
+          : path.endsWith("/api/v1/settings/default-model")
+            ? { defaultModel: null }
+            : currentSnapshot;
+      return Promise.resolve(new Response(JSON.stringify(payload), {
+        headers: { "content-type": "application/json" }
+      }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)));
+
+    const invite = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find(button => button.textContent?.includes("Invite"));
+    await act(async () => invite!.click());
+    const settings = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open settings"]'
+    );
+    expect(settings?.disabled).toBe(false);
+    await act(async () => settings!.click());
+    expect(document.querySelector('[role="dialog"][aria-modal="true"]')).not.toBeNull();
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+
+    const remove = document.querySelector<HTMLButtonElement>(
+      `button[aria-label="Remove ${agent.name} from room"]`
+    );
+    expect(remove?.disabled).toBe(false);
+    await act(async () => remove!.click());
+    expect(document.querySelector('[role="group"][aria-label^="Remove"]')?.textContent)
+      .toContain("Remove from this room?");
+    const confirm = document.querySelector<HTMLButtonElement>(
+      '[role="group"][aria-label^="Remove"] .danger-button'
+    );
+    await act(async () => {
+      confirm!.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(document.body.textContent).not.toContain(agent.name);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v1/rooms/${room.id}/agents/${agent.id}`,
+      expect.objectContaining({ method: "DELETE" })
+    );
+
+    releaseSpeaker(new Response(JSON.stringify({}), {
+      headers: { "content-type": "application/json" }
+    }));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)));
     await act(async () => root.unmount());
   });
 });

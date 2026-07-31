@@ -15,6 +15,57 @@ let page;
 const consoleErrors = [];
 const pageErrors = [];
 const failedResponses = [];
+let releaseParticipantResponse;
+const participantResponseGate = new Promise(resolve => {
+  releaseParticipantResponse = resolve;
+});
+const fixtureCapabilities = {
+  contextLength: 256_000,
+  textInput: true,
+  imageInput: true,
+  pdfInput: true,
+  toolCalling: true,
+  structuredOutput: true,
+  reasoningInputControl: true,
+  reasoningOutput: true,
+  promptCaching: true
+};
+const browserProvider = {
+  id: "openrouter",
+  async listModels() {
+    return [{
+      id: "moonshotai/kimi-k3",
+      name: "MoonshotAI: Kimi K3",
+      capabilities: fixtureCapabilities
+    }];
+  },
+  async getCapabilities(modelId) {
+    return modelId === "moonshotai/kimi-k3" ? fixtureCapabilities : undefined;
+  },
+  async *streamChat(request) {
+    if (request.sessionId.startsWith("voice-template-generator")) {
+      yield {
+        type: "text-delta",
+        text: JSON.stringify({
+          title: "Pragmatic Systems Architect",
+          description: "Identifies concrete failure modes and actionable mitigations.",
+          systemPrompt: "Find concrete architecture failures, separate evidence from assumptions, and propose actionable mitigations.",
+          personaPrompt: "Direct, pragmatic, and specific.",
+          temperature: 0.6
+        })
+      };
+      yield { type: "done", finishReason: "stop" };
+      return;
+    }
+    await participantResponseGate;
+    yield {
+      type: "text-delta",
+      text: "One concrete failure mode is stale scheduler selection after a participant leaves the room. Revalidate membership immediately before generation."
+    };
+    yield { type: "usage", inputTokens: 120, outputTokens: 24, costUsd: 0.001 };
+    yield { type: "done", finishReason: "stop" };
+  }
+};
 
 function trackBrowserFailures(currentPage) {
   currentPage.on("console", message => {
@@ -35,8 +86,22 @@ async function selectTemplateByText(text) {
   await select.selectOption(value);
 }
 
+async function waitForCondition(predicate, message, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
+}
+
 try {
-  runtime = await startRuntime({ dataRoot, host: "127.0.0.1", port: 0 });
+  runtime = await startRuntime({
+    dataRoot,
+    host: "127.0.0.1",
+    port: 0,
+    providers: new Map([["openrouter", browserProvider]])
+  });
   const address = runtime.address();
   assert.ok(address, "Browser test server did not bind");
   const baseUrl = `http://127.0.0.1:${address.port}`;
@@ -121,6 +186,23 @@ try {
     fullPage: true
   });
 
+  await page.getByRole("button", { name: "New template" }).click();
+  const templateForm = page.locator(".template-form");
+  await templateForm.getByLabel("Template title").fill("");
+  await templateForm.getByLabel("Voice name").fill("");
+  await templateForm.getByRole("combobox", { name: "Model", exact: true }).fill("");
+  await templateForm.getByLabel("System prompt").fill("");
+  const invalidCreate = templateForm.getByRole("button", { name: "Create template" });
+  assert.equal(await invalidCreate.isEnabled(), true, "Validation was hidden behind a disabled save button");
+  await invalidCreate.click();
+  await templateForm.getByRole("alert").filter({
+    hasText: "Template title, Voice name, Model, and System prompt are required"
+  }).waitFor();
+  await page.screenshot({
+    path: join(evidenceRoot, "required-template-warning.png"),
+    fullPage: true
+  });
+
   await page.getByRole("button", { name: "Close settings" }).click();
   await page.getByRole("button", { name: "Add voice" }).click();
   await selectTemplateByText("Browser Product Critic");
@@ -134,6 +216,78 @@ try {
   assert.equal(await page.locator(".participant").count(), 2);
   await page.screenshot({
     path: join(evidenceRoot, "two-added-participants.png"),
+    fullPage: true
+  });
+
+  await page.locator(".toggle-label .toggle").click();
+  await page.locator(".toggle-label .toggle:not(.on)").waitFor();
+  const prompt = "Identify one concrete failure mode in this room design.";
+  await page.locator(".composer textarea").fill(prompt);
+  await page.locator(".composer textarea").press("Enter");
+  await page.locator(".human-message").filter({ hasText: prompt }).waitFor();
+
+  const browserRoom = runtime.store.listRooms().find(room =>
+    room.title === "Browser verification room"
+  );
+  assert.ok(browserRoom, "Browser-created room was not persisted");
+  await page.locator(".participant").filter({ hasText: "Browser Architect" })
+    .getByRole("button", { name: "Invite" }).click();
+  await waitForCondition(
+    () => runtime.store.getSnapshot(browserRoom.id).generations.some(
+      generation => generation.status === "streaming"
+    ),
+    "The real speaker endpoint never persisted a streaming generation"
+  );
+  const settingsButton = page.getByRole("button", { name: "Open settings" });
+  assert.equal(await settingsButton.isEnabled(), true, "Settings was locked during generation");
+  await settingsButton.click();
+  await page.locator(".settings-page").waitFor();
+  assert.equal(
+    runtime.store.getSnapshot(browserRoom.id).generations.some(
+      generation => generation.status === "streaming"
+    ),
+    true,
+    "The participant was no longer generating when Settings opened"
+  );
+  await page.screenshot({
+    path: join(evidenceRoot, "settings-during-generation.png"),
+    fullPage: true
+  });
+  releaseParticipantResponse();
+  await waitForCondition(
+    () => runtime.store.getSnapshot(browserRoom.id).generations.some(
+      generation => generation.status === "complete"
+    ),
+    "The real participant response did not complete",
+    310_000
+  );
+  const completedReply = runtime.store.getSnapshot(browserRoom.id).generations.find(
+    generation => generation.status === "complete"
+  )?.finalText.trim();
+  assert.ok(completedReply, "The completed generation persisted no response text");
+  await page.getByRole("button", { name: "Close settings" }).click();
+  const renderedReply = page.locator(".agent-message .message-copy").filter({
+    hasText: completedReply.slice(0, 120)
+  });
+  await renderedReply.waitFor();
+  assert.ok(
+    (await renderedReply.innerText()).includes(completedReply.slice(0, 120)),
+    "The completed participant response did not render"
+  );
+
+  await page.getByRole("button", {
+    name: "Remove Browser Critic from room"
+  }).click();
+  const removalConfirmation = page.getByRole("group", {
+    name: "Remove Browser Critic?"
+  });
+  await removalConfirmation.getByRole("button", { name: "Remove" }).click();
+  await page.locator(".participant").filter({ hasText: "Browser Critic" }).waitFor({
+    state: "detached"
+  });
+  assert.equal(await page.locator(".participant").count(), 1, "Participant was not removed");
+  await page.screenshot({
+    path: join(evidenceRoot, "participant-removed.png"),
     fullPage: true
   });
 
@@ -151,6 +305,10 @@ try {
     ok: true,
     templatesSaved: 2,
     participantsAdded: 2,
+    participantsRemoved: 1,
+    requiredFieldWarning: true,
+    settingsAvailableDuringGeneration: true,
+    realConversationCompleted: true,
     consoleErrors: 0,
     pageErrors: 0,
     failedApiResponses: 0,

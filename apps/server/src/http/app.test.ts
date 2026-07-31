@@ -399,4 +399,52 @@ describe("local HTTP room seam", () => {
 
     store.close();
   });
+
+  it("removes a participant from one room without deleting it from another room", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const firstRoom = store.createRoom({ title: "First room" });
+    const secondRoom = store.createRoom({ title: "Second room" });
+    const agent = {
+      id: "systems",
+      name: "Systems Engineer",
+      description: "Finds durable architectural seams.",
+      provider: "openrouter" as const,
+      modelId: "fixture/model",
+      systemPrompt: "Advance the design with concrete architecture.",
+      temperature: 0.5,
+      maxOutputTokens: 600,
+      reasoning: { enabled: true, displayMode: "summary" as const },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 12_000,
+        hardLimitTokens: 16_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    };
+    store.addAgent(firstRoom.id, agent);
+    store.addAgent(secondRoom.id, agent);
+
+    const removed = await request(application)
+      .delete(`/api/v1/rooms/${firstRoom.id}/agents/${agent.id}`)
+      .expect(200);
+
+    expect(removed.body).toMatchObject({
+      removed: true,
+      agent: { id: agent.id, name: agent.name }
+    });
+    expect(store.getSnapshot(firstRoom.id).agents).toEqual([]);
+    expect(store.getSnapshot(firstRoom.id).runtime).toEqual([]);
+    expect(store.getSnapshot(secondRoom.id).agents).toMatchObject([
+      { id: agent.id, name: agent.name }
+    ]);
+    store.close();
+  });
 });

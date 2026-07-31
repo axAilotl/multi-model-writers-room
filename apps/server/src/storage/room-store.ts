@@ -228,6 +228,38 @@ export class RoomStore {
     );
   }
 
+  getRoomAgent(roomId: string, agentId: string): AgentDefinition {
+    this.getRoom(roomId);
+    const agent = this.listAgents(roomId).find(candidate => candidate.id === agentId);
+    if (!agent) throw new Error(`Agent not found in room: ${agentId}`);
+    return agent;
+  }
+
+  removeAgent(roomId: string, agentId: string): AgentDefinition {
+    const agent = this.getRoomAgent(roomId, agentId);
+    this.database.transaction(() => {
+      this.database.prepare(`
+        DELETE FROM agent_runtime_state
+        WHERE room_id = ? AND agent_id = ?
+      `).run(roomId, agentId);
+      const result = this.database.prepare(`
+        DELETE FROM room_agents
+        WHERE room_id = ? AND agent_id = ?
+      `).run(roomId, agentId);
+      if (result.changes !== 1) {
+        throw new Error(`Agent not found in room: ${agentId}`);
+      }
+      this.database.prepare(`
+        DELETE FROM agents
+        WHERE id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM room_agents WHERE agent_id = ?
+          )
+      `).run(agentId, agentId);
+    })();
+    return agent;
+  }
+
   getDefaultModel(): DefaultModelSelection | undefined {
     const row = this.database.prepare(
       "SELECT payload_json FROM application_settings WHERE key = ?"

@@ -182,7 +182,17 @@ export class ConversationScheduler {
         return { waves, replies, stopReason: "silence" };
       }
 
-      const settled = await Promise.allSettled(selected.map(candidate =>
+      const currentAgentIds = new Set(
+        this.dependencies.store.listAgents(roomId).map(agent => agent.id)
+      );
+      const currentSelection = selected.filter(candidate =>
+        currentAgentIds.has(candidate.agent.id)
+      );
+      if (currentSelection.length === 0) {
+        return { waves, replies, stopReason: "silence" };
+      }
+
+      const settled = await Promise.allSettled(currentSelection.map(candidate =>
         this.dependencies.generator.generate({
           roomId,
           agentId: candidate.agent.id,

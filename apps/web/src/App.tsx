@@ -16,6 +16,7 @@ import {
   Send,
   Settings as SettingsIcon,
   Sparkles,
+  Trash2,
   Upload,
   Users,
   Volume2,
@@ -553,12 +554,12 @@ function AddAgent({ roomId, onAdded, onClose }: {
             placeholder="Short stylistic direction for this voice."
           />
         </label>
-        {error && <div className="settings-error">{error}</div>}
+        {error && <div className="settings-error" role="alert">{error}</div>}
         <footer>
           <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
           <button
             className="primary-button"
-            disabled={saving || !draft.name.trim() || !draft.modelId}
+            disabled={saving}
           >
             {saving ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />}
             Add participant
@@ -569,12 +570,15 @@ function AddAgent({ roomId, onAdded, onClose }: {
   );
 }
 
-function ParticipantsPanel({ snapshot, busy, onAction, onAdd }: {
+function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
   snapshot: RoomSnapshot;
   busy: boolean;
   onAction: (action: () => Promise<unknown>) => void;
   onAdd: () => void;
+  onRemove: (agentId: string) => Promise<boolean>;
 }) {
+  const [confirmingRemovalId, setConfirmingRemovalId] = useState<string>();
+  const [removingId, setRemovingId] = useState<string>();
   return (
     <aside className="right-panel">
       <div className="panel-title">
@@ -622,6 +626,15 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd }: {
               </div>
               <div className="participant-actions">
                 <button
+                  className="participant-remove"
+                  title={`Remove ${agent.name} from room`}
+                  aria-label={`Remove ${agent.name} from room`}
+                  disabled={removingId !== undefined}
+                  onClick={() => setConfirmingRemovalId(agent.id)}
+                >
+                  <Trash2 size={13} /> Remove
+                </button>
+                <button
                   disabled={busy}
                   title={runtime?.muted ? "Unmute" : "Mute"}
                   onClick={() => onAction(() =>
@@ -639,6 +652,35 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd }: {
                   <Mic2 size={13} /> Invite
                 </button>
               </div>
+              {confirmingRemovalId === agent.id && (
+                <div className="participant-remove-confirmation" role="group" aria-label={`Remove ${agent.name}?`}>
+                  <span>Remove from this room?</span>
+                  <button
+                    className="secondary-button"
+                    disabled={removingId !== undefined}
+                    onClick={() => setConfirmingRemovalId(undefined)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="danger-button"
+                    disabled={removingId !== undefined}
+                    onClick={() => {
+                      setRemovingId(agent.id);
+                      void onRemove(agent.id).then(removed => {
+                        if (removed) setConfirmingRemovalId(undefined);
+                      }).finally(() => {
+                        setRemovingId(undefined);
+                      });
+                    }}
+                  >
+                    {removingId === agent.id
+                      ? <LoaderCircle size={13} className="spin" />
+                      : <Trash2 size={13} />}
+                    Remove
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
@@ -747,16 +789,21 @@ export default function App() {
       .map(agent => agent.id);
   }, [composer, snapshot]);
 
-  async function act(action: () => Promise<unknown>) {
-    setBusy(true);
+  async function runRoomAction(
+    action: () => Promise<unknown>,
+    trackBusy = true
+  ): Promise<boolean> {
+    if (trackBusy) setBusy(true);
     setError(undefined);
     try {
       await action();
       await refresh(roomId);
+      return true;
     } catch (errorValue) {
       setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+      return false;
     } finally {
-      setBusy(false);
+      if (trackBusy) setBusy(false);
     }
   }
 
@@ -801,7 +848,6 @@ export default function App() {
             onClick={() => setShowSettings(true)}
             aria-label="Open settings"
             title="Settings"
-            disabled={busy}
           >
             <SettingsIcon size={15} />
           </button>
@@ -809,7 +855,7 @@ export default function App() {
             Auto
             <button
               className={`toggle ${snapshot.room.settings.autoMode ? "on" : ""}`}
-              onClick={() => void act(() => api.updateRoom(snapshot.room.id, {
+              onClick={() => void runRoomAction(() => api.updateRoom(snapshot.room.id, {
                 settings: { autoMode: !snapshot.room.settings.autoMode }
               }))}
               disabled={busy}
@@ -819,7 +865,7 @@ export default function App() {
             <Sparkles size={13} />
             <select
               value={snapshot.room.settings.maxResponders}
-              onChange={event => void act(() => api.updateRoom(snapshot.room.id, {
+              onChange={event => void runRoomAction(() => api.updateRoom(snapshot.room.id, {
                 settings: { maxResponders: Number(event.target.value) }
               }))}
               disabled={busy}
@@ -831,7 +877,7 @@ export default function App() {
           </label>
           <button
             className="pause-button"
-            onClick={() => void act(() => api.updateRoom(snapshot.room.id, {
+            onClick={() => void runRoomAction(() => api.updateRoom(snapshot.room.id, {
               status: snapshot.room.status === "running" ? "paused" : "running"
             }))}
             disabled={busy}
@@ -859,8 +905,8 @@ export default function App() {
           <Conversation
             snapshot={snapshot}
             busy={busy}
-            onDeleteTail={() => void act(() => api.deleteTail(snapshot.room.id))}
-            onRegenerateTail={() => void act(() => api.regenerateTail(snapshot.room.id))}
+            onDeleteTail={() => void runRoomAction(() => api.deleteTail(snapshot.room.id))}
+            onRegenerateTail={() => void runRoomAction(() => api.regenerateTail(snapshot.room.id))}
           />
           <form
             className="composer"
@@ -869,7 +915,7 @@ export default function App() {
               const content = composer.trim();
               if (!content) return;
               setComposer("");
-              void act(() => api.sendMessage(snapshot.room.id, content, mentions));
+              void runRoomAction(() => api.sendMessage(snapshot.room.id, content, mentions));
             }}
           >
             <textarea
@@ -897,8 +943,12 @@ export default function App() {
         <ParticipantsPanel
           snapshot={snapshot}
           busy={busy}
-          onAction={action => void act(action)}
+          onAction={action => void runRoomAction(action)}
           onAdd={() => setShowAgent(true)}
+          onRemove={agentId => runRoomAction(
+            () => api.removeAgent(snapshot.room.id, agentId),
+            false
+          )}
         />
       </div>
       {showAgent && (

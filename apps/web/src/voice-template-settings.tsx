@@ -72,6 +72,7 @@ export function VoiceTemplateEditor() {
   ) {
     setSaved(false);
     setConfirmingDelete(false);
+    setError(undefined);
     setDraft(current => ({ ...current, [key]: value }));
   }
 
@@ -177,6 +178,7 @@ export function VoiceTemplateEditor() {
           <div className="field-row">
             <label>Template title
               <input
+                name="title"
                 required
                 value={draft.title}
                 onChange={event => update("title", event.target.value)}
@@ -184,6 +186,7 @@ export function VoiceTemplateEditor() {
             </label>
             <label>Voice name
               <input
+                name="name"
                 required
                 value={draft.name}
                 onChange={event => update("name", event.target.value)}
@@ -193,6 +196,7 @@ export function VoiceTemplateEditor() {
           </div>
           <label>Point of view
             <input
+              name="description"
               value={draft.description}
               onChange={event => update("description", event.target.value)}
               placeholder="Finds durable seams and failure modes."
@@ -201,6 +205,7 @@ export function VoiceTemplateEditor() {
           <div className="field-row provider-model-row">
             <label>Provider
               <select
+                name="provider"
                 value={draft.provider}
                 onChange={event => {
                   update(
@@ -225,6 +230,7 @@ export function VoiceTemplateEditor() {
           </div>
           <label>System prompt
             <textarea
+              name="systemPrompt"
               required
               rows={5}
               value={draft.systemPrompt}
@@ -233,6 +239,7 @@ export function VoiceTemplateEditor() {
           </label>
           <label>Persona prompt
             <textarea
+              name="personaPrompt"
               rows={3}
               value={draft.personaPrompt ?? ""}
               onChange={event => update("personaPrompt", event.target.value)}
@@ -410,7 +417,7 @@ export function VoiceTemplateEditor() {
               </label>
             </div>
           </fieldset>
-          {error && <div className="settings-error">{error}</div>}
+          {error && <div className="settings-error" role="alert">{error}</div>}
           <footer>
             {selectedId && !confirmingDelete && (
               <button
@@ -447,7 +454,7 @@ export function VoiceTemplateEditor() {
               </div>
             )}
             {saved && <span className="saved-label"><Check size={13} /> Saved</span>}
-            <button className="primary-button" disabled={saving || !draft.name.trim()}>
+            <button className="primary-button" disabled={saving}>
               {saving ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
               {selectedId ? "Save template" : "Create template"}
             </button>

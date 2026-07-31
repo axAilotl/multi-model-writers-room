@@ -163,6 +163,13 @@ export const api = {
     });
   },
 
+  async removeAgent(roomId: string, agentId: string): Promise<void> {
+    await requestJson(
+      `/api/v1/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(agentId)}`,
+      { method: "DELETE" }
+    );
+  },
+
   sendMessage(
     roomId: string,
     content: string,

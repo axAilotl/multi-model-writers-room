@@ -285,4 +285,61 @@ describe("conversation scheduler seam", () => {
     expect(store.getRuntime(room.id, "alpha").fatigue).toBeCloseTo(0.5);
     store.close();
   });
+
+  it("does not launch an agent removed while activation is being evaluated", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-removal-race-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({
+      title: "Removal race room",
+      settings: { maxResponders: 1, maxAutonomousWaves: 1 }
+    });
+    store.addAgent(room.id, agent("alpha"));
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Should the remaining participant answer?"
+    });
+    let evaluationStarted!: () => void;
+    const started = new Promise<void>(resolve => {
+      evaluationStarted = resolve;
+    });
+    let releaseEvaluation!: () => void;
+    const evaluationGate = new Promise<void>(resolve => {
+      releaseEvaluation = resolve;
+    });
+    const evaluator: ActivationEvaluator = {
+      evaluate: async () => {
+        evaluationStarted();
+        await evaluationGate;
+        return {
+          shouldRespond: true,
+          urgency: 1,
+          confidence: 1
+        };
+      }
+    };
+    const spoken: string[] = [];
+    const generator: SpeakerGenerator = {
+      generate: async input => {
+        spoken.push(input.agentId);
+        throw new Error("A removed participant must not be launched");
+      }
+    };
+    const scheduler = new ConversationScheduler({ store, evaluator, generator });
+
+    const run = scheduler.runFromHumanMessage(room.id, human.id);
+    await started;
+    store.removeAgent(room.id, "alpha");
+    releaseEvaluation();
+
+    await expect(run).resolves.toMatchObject({
+      waves: 0,
+      replies: 0,
+      stopReason: "silence"
+    });
+    expect(spoken).toEqual([]);
+    store.close();
+  });
 });

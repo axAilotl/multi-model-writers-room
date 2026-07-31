@@ -99,6 +99,7 @@ export async function startRuntime(input?: {
   dataRoot?: string;
   host?: string;
   port?: number;
+  providers?: ReadonlyMap<string, ModelProvider>;
 }): Promise<WritersRoomRuntime> {
   const dataRoot = resolve(
     input?.dataRoot ??
@@ -116,7 +117,7 @@ export async function startRuntime(input?: {
   const tools = new RoomToolExecutor(store, workspace);
   const app = createHttpApplication({
     store,
-    providers: providerRegistry(),
+    providers: input?.providers ?? providerRegistry(),
     workspace,
     tools
   });

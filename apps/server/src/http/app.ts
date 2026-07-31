@@ -251,6 +251,20 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     response.status(201).json({ agent: added });
   });
 
+  application.delete(
+    "/api/v1/rooms/:roomId/agents/:agentId",
+    (request, response) => {
+      const roomId = String(request.params.roomId);
+      const agentId = String(request.params.agentId);
+      options.store.getRoomAgent(roomId, agentId);
+      engine.interruptAgent(roomId, agentId);
+      const agent = options.store.removeAgent(roomId, agentId);
+      const room = options.store.getRoom(roomId);
+      options.store.appendRoomEvent(room.id, { type: "room.snapshot", room });
+      response.json({ removed: true, agent });
+    }
+  );
+
   application.post("/api/v1/rooms/:roomId/messages", (request, response) => {
     const input = createMessageSchema.parse(request.body);
     const message = options.store.appendMessage({

@@ -169,6 +169,10 @@ button { color: inherit; }
 .participant-actions { display: flex; justify-content: flex-end; gap: 5px; margin-top: 9px; }
 .participant-actions button { border: 1px solid #ded9ce; background: white; height: 25px; padding: 0 7px; border-radius: 5px; display: flex; align-items: center; gap: 4px; font-size: 8px; cursor: pointer; }
 .participant-actions button:disabled { opacity: .45; }
+.participant-actions .participant-remove { margin-right: auto; color: #944533; }
+.participant-remove-confirmation { margin-top: 7px; padding: 7px; border: 1px solid #e4b7aa; border-radius: 6px; background: #fff8f5; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.participant-remove-confirmation span { margin-right: auto; color: #79382c; font-size: 9px; font-weight: 650; }
+.participant-remove-confirmation button { min-height: 27px; padding: 0 8px; font-size: 9px; }
 .room-meter { margin: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .room-meter > span { font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: #8e897e; }
 .room-meter > div { height: 4px; background: #ddd8cc; border-radius: 4px; margin: 7px 0; }
