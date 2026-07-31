@@ -11,6 +11,7 @@ import type {
 import { createHttpApplication } from "./app.js";
 import type { ModelProvider, ModelDescriptor } from "../providers/model-provider.js";
 import { RoomStore } from "../storage/room-store.js";
+import { WorkspaceService } from "../workspace/workspace-service.js";
 
 class FixtureProvider implements ModelProvider {
   readonly id = "openrouter";
@@ -480,6 +481,225 @@ describe("local HTTP room seam", () => {
       .get("/api/v1/voice-templates")
       .expect(200);
     expect(listed.body.templates).toEqual([]);
+    store.close();
+  });
+
+  it("propagates a linked voice template name into room participants and chat identity", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const room = store.createRoom({ title: "Linked voice room" });
+    const created = await request(application)
+      .post("/api/v1/voice-templates")
+      .send({
+        title: "Linked critic",
+        name: "Original Name",
+        description: "A linked room voice.",
+        provider: "openrouter",
+        modelId: "anthropic/claude-sonnet",
+        systemPrompt: "Challenge the draft.",
+        temperature: 0.6,
+        maxOutputTokens: 700,
+        reasoning: { enabled: false, displayMode: "hidden" },
+        tools: ["search_workspace"],
+        contextBudget: {
+          softLimitTokens: 12_000,
+          hardLimitTokens: 16_000,
+          recentTranscriptTokens: 8_000,
+          retrievedContextTokens: 2_000,
+          notebookTokens: 0
+        }
+      })
+      .expect(201);
+    const template = created.body.template;
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send({
+        ...template,
+        id: "linked-critic",
+        voiceTemplateId: template.id
+      })
+      .expect(201);
+    store.appendMessage({
+      roomId: room.id,
+      authorType: "agent",
+      authorId: "linked-critic",
+      content: "Existing message"
+    });
+
+    await request(application)
+      .patch(`/api/v1/voice-templates/${template.id}`)
+      .send({ name: "Renamed Voice" })
+      .expect(200);
+    const snapshot = await request(application)
+      .get(`/api/v1/rooms/${room.id}`)
+      .expect(200);
+
+    expect(snapshot.body.agents).toMatchObject([
+      { id: "linked-critic", name: "Renamed Voice", voiceTemplateId: template.id }
+    ]);
+    expect(snapshot.body.messages).toMatchObject([
+      { authorId: "linked-critic", content: "Existing message" }
+    ]);
+    store.close();
+  });
+
+  it("backfills legacy room voices from their uniquely matching template", () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const databasePath = join(root, "room.db");
+    const firstStore = new RoomStore(databasePath);
+    const room = firstStore.createRoom({ title: "Legacy voice room" });
+    const template = firstStore.createVoiceTemplate({
+      title: "Canonical reviewer",
+      name: "Canonical Name",
+      description: "Template-backed identity.",
+      provider: "openrouter",
+      modelId: "anthropic/claude-sonnet",
+      systemPrompt: "A uniquely identifying legacy system prompt.",
+      temperature: 0.6,
+      maxOutputTokens: 700,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 12_000,
+        hardLimitTokens: 16_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    });
+    firstStore.addAgent(room.id, {
+      id: "legacy-reviewer",
+      name: "Stale Room Name",
+      description: "",
+      provider: "openrouter",
+      modelId: "older/model-selection",
+      systemPrompt: template.systemPrompt,
+      temperature: 0.2,
+      maxOutputTokens: 300,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 4_000,
+        hardLimitTokens: 8_000,
+        recentTranscriptTokens: 2_000,
+        retrievedContextTokens: 1_000,
+        notebookTokens: 0
+      }
+    });
+    firstStore.close();
+
+    const reopenedStore = new RoomStore(databasePath);
+    expect(reopenedStore.getRoomAgent(room.id, "legacy-reviewer")).toMatchObject({
+      voiceTemplateId: template.id,
+      name: "Canonical Name",
+      modelId: "older/model-selection",
+      maxOutputTokens: 700,
+      contextBudget: template.contextBudget
+    });
+    reopenedStore.close();
+  });
+
+  it("resets chat while retaining participants, artifacts, notes, and room settings", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: {
+        dimensions: 2,
+        embedDocuments: async texts => texts.map(() => new Float32Array([1, 0])),
+        embedQuery: async () => new Float32Array([1, 0])
+      },
+      housekeeping: {
+        summarize: async () => ({ summary: "Persistent test evidence." })
+      }
+    });
+    const application = createHttpApplication({
+      store,
+      workspace,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const room = store.createRoom({
+      title: "Resettable room",
+      settings: { maxResponders: 2 }
+    });
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send({
+        id: "reset-voice",
+        name: "Reset Voice",
+        description: "Survives transcript resets.",
+        provider: "openrouter",
+        modelId: "anthropic/claude-sonnet",
+        systemPrompt: "Answer directly.",
+        temperature: 0.5,
+        maxOutputTokens: 700,
+        reasoning: { enabled: false, displayMode: "hidden" },
+        tools: [],
+        contextBudget: {
+          softLimitTokens: 12_000,
+          hardLimitTokens: 16_000,
+          recentTranscriptTokens: 8_000,
+          retrievedContextTokens: 2_000,
+          notebookTokens: 0
+        }
+      })
+      .expect(201);
+    await workspace.ingest({
+      roomId: room.id,
+      filename: "keep.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("# Keep me\nThis artifact survives chat reset.")
+    });
+    store.appendNote({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      text: "Keep this note"
+    });
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Temporary transcript"
+    });
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/speakers/reset-voice`)
+      .send({ targetMessageId: human.id })
+      .expect(201);
+    store.updateRuntime(room.id, "reset-voice", {
+      fatigue: 0.8,
+      activation: 0.7,
+      consecutiveTurns: 3
+    });
+
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/chat/reset`)
+      .send({})
+      .expect(200);
+    const snapshot = store.getSnapshot(room.id);
+
+    expect(snapshot.messages).toEqual([]);
+    expect(snapshot.generations).toEqual([]);
+    expect(snapshot.activations).toEqual([]);
+    expect(snapshot.agents).toMatchObject([{ id: "reset-voice" }]);
+    expect(snapshot.artifacts).toMatchObject([{ filename: "keep.md" }]);
+    expect(snapshot.notes).toMatchObject([{ text: "Keep this note" }]);
+    expect(snapshot.room.settings.maxResponders).toBe(2);
+    expect(snapshot.runtime).toMatchObject([{
+      agentId: "reset-voice",
+      fatigue: 0,
+      activation: 0,
+      consecutiveTurns: 0
+    }]);
+    await workspace.waitForEnrichment();
     store.close();
   });
 

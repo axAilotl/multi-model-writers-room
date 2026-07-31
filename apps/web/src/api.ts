@@ -149,6 +149,13 @@ export const api = {
     });
   },
 
+  async resetChat(roomId: string): Promise<void> {
+    await requestJson(`/api/v1/rooms/${encodeURIComponent(roomId)}/chat/reset`, {
+      method: "POST",
+      body: "{}"
+    });
+  },
+
   snapshot(roomId: string): Promise<RoomSnapshot> {
     return requestJson(`/api/v1/rooms/${roomId}`);
   },

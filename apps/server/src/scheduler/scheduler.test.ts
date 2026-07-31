@@ -182,6 +182,72 @@ describe("conversation scheduler seam", () => {
     store.close();
   });
 
+  it("routes a human direct mention only to the mentioned participant", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-direct-mention-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({
+      title: "Direct mention room",
+      settings: {
+        maxResponders: 2,
+        maxAutonomousWaves: 1,
+        maxAutonomousReplies: 2
+      }
+    });
+    store.addAgent(room.id, agent("alpha"));
+    store.addAgent(room.id, agent("beta"));
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "@Alpha answer this directly.",
+      mentionedAgentIds: ["alpha"]
+    });
+    const spoken: string[] = [];
+    const evaluator: ActivationEvaluator = {
+      evaluate: async () => ({
+        shouldRespond: true,
+        urgency: 1,
+        confidence: 1,
+        intendedMove: "answer"
+      })
+    };
+    const generator: SpeakerGenerator = {
+      generate: async input => {
+        spoken.push(input.agentId);
+        const message = store.appendMessage({
+          roomId: input.roomId,
+          authorType: "agent",
+          authorId: input.agentId,
+          content: `${input.agentId} response`
+        });
+        return {
+          message,
+          generation: {
+            id: `generation-${input.agentId}`,
+            roomId: input.roomId,
+            messageId: message.id,
+            agentId: input.agentId,
+            provider: "openrouter",
+            requestedModelId: "fixture",
+            status: "complete",
+            finalText: message.content,
+            retrievedChunkIds: [],
+            outputTokens: 40,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          }
+        };
+      }
+    };
+    const scheduler = new ConversationScheduler({ store, evaluator, generator });
+
+    await scheduler.runFromHumanMessage(room.id, human.id);
+
+    expect(spoken).toEqual(["alpha"]);
+    store.close();
+  });
+
   it("never launches more speakers than the remaining autonomous reply budget", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-reply-cap-"));
     roots.push(root);

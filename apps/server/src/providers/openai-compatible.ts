@@ -184,12 +184,21 @@ function deltaEvents(
   }
   const choice = delta.choices?.[0];
   const message = choice?.delta;
+  const emittedReasoning = new Set<string>();
   const reasoning = message?.reasoning ?? message?.reasoning_content;
-  if (reasoning) events.push({ type: "reasoning-delta", text: reasoning });
+  if (reasoning) {
+    emittedReasoning.add(reasoning);
+    events.push({ type: "reasoning-delta", text: reasoning });
+  }
   for (const detail of message?.reasoning_details ?? []) {
     if (detail.type === "reasoning.summary" && detail.summary) {
       events.push({ type: "reasoning-summary", text: detail.summary });
-    } else if (detail.type === "reasoning.text" && detail.text) {
+    } else if (
+      detail.type === "reasoning.text" &&
+      detail.text &&
+      !emittedReasoning.has(detail.text)
+    ) {
+      emittedReasoning.add(detail.text);
       events.push({ type: "reasoning-delta", text: detail.text });
     }
   }

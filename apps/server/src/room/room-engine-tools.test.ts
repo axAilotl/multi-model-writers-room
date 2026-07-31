@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 describe("room generation tool seam", () => {
-  it("executes a bounded workspace tool round and persists its cited evidence", async () => {
+  it("executes eight bounded workspace tool rounds and exposes stable artifact IDs", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-tools-"));
     roots.push(root);
     const store = new RoomStore(join(root, "room.db"));
@@ -43,7 +43,7 @@ describe("room generation tool seam", () => {
       embeddings,
       housekeeping
     });
-    await workspace.ingest({
+    const artifact = await workspace.ingest({
       roomId: room.id,
       filename: "roadmap.md",
       mediaType: "text/markdown",
@@ -95,9 +95,14 @@ describe("room generation tool seam", () => {
       ): AsyncIterable<NormalizedGenerationEvent> {
         round += 1;
         if (round === 1) {
+          expect(request.messages.some(message =>
+            message.content.includes(`artifact_id: ${artifact.id}`)
+          )).toBe(true);
+        }
+        if (round <= 8) {
           yield {
             type: "tool-call",
-            id: "call-1",
+            id: `call-${round}`,
             name: "search_workspace",
             arguments: '{"query":"canonical transcript"}'
           };
@@ -127,9 +132,10 @@ describe("room generation tool seam", () => {
     const inspection = store.getGenerationInspection(result.generation.id);
 
     expect(result.message.citedChunkIds).toHaveLength(1);
-    expect(inspection.toolCalls).toMatchObject([
-      { toolName: "search_workspace", status: "complete" }
-    ]);
+    expect(inspection.toolCalls).toHaveLength(8);
+    expect(inspection.toolCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolName: "search_workspace", status: "complete" })
+    ]));
     expect(inspection.citations).toMatchObject([
       { filename: "roadmap.md", text: expect.stringContaining("canonical") }
     ]);

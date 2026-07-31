@@ -80,6 +80,7 @@ const personaPromptSchema = z.string().trim();
 
 export const agentDefinitionSchema = z.object({
   id: z.string().min(1),
+  voiceTemplateId: z.string().min(1).optional(),
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(500).default(""),
   provider: providerKindSchema,
@@ -97,7 +98,7 @@ export const agentDefinitionSchema = z.object({
 export type AgentDefinition = z.infer<typeof agentDefinitionSchema>;
 
 export const voiceTemplateInputSchema = agentDefinitionSchema
-  .omit({ id: true, capabilities: true })
+  .omit({ id: true, voiceTemplateId: true, capabilities: true })
   .extend({
     title: z.string().trim().min(1).max(120)
   });
@@ -109,7 +110,7 @@ export function createDefaultVoiceConfiguration(): Pick<
 > {
   return {
     temperature: 0.7,
-    maxOutputTokens: 1_200,
+    maxOutputTokens: 2_400,
     reasoning: {
       enabled: true,
       effort: "medium",
@@ -117,10 +118,10 @@ export function createDefaultVoiceConfiguration(): Pick<
     },
     tools: [...defaultRoomToolNames],
     contextBudget: {
-      softLimitTokens: 120_000,
-      hardLimitTokens: 160_000,
-      recentTranscriptTokens: 70_000,
-      retrievedContextTokens: 24_000,
+      softLimitTokens: 240_000,
+      hardLimitTokens: 320_000,
+      recentTranscriptTokens: 140_000,
+      retrievedContextTokens: 48_000,
       notebookTokens: 0
     }
   };

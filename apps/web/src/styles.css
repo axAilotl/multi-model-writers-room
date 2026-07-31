@@ -173,13 +173,25 @@ button { color: inherit; }
 .message:hover .tail-actions { opacity: 1; }
 .tail-actions button { display: flex; gap: 4px; align-items: center; border: 0; background: transparent; color: #8d887c; font-size: 9px; padding: 3px; cursor: pointer; }
 
-.composer { flex: 0 0 auto; margin: 10px max(24px, calc((100% - 800px) / 2)) 18px; background: white; border: 1px solid #d9d4c8; border-radius: 10px; box-shadow: 0 7px 24px rgba(50, 45, 34, .08); overflow: hidden; }
+.composer { position: relative; flex: 0 0 auto; margin: 10px max(24px, calc((100% - 800px) / 2)) 18px; background: white; border: 1px solid #d9d4c8; border-radius: 10px; box-shadow: 0 7px 24px rgba(50, 45, 34, .08); overflow: visible; }
 .composer textarea { width: 100%; resize: none; border: 0; outline: 0; padding: 13px 14px 8px; color: var(--ink); font-size: 12px; line-height: 1.5; }
 .composer-footer { display: flex; justify-content: space-between; align-items: center; padding: 5px 8px 8px 11px; }
 .composer-footer > div { display: flex; align-items: center; gap: 8px; color: #a5a095; font-size: 8px; }
 .composer-footer button { border: 0; background: transparent; cursor: pointer; color: #8f897e; }
 .composer-footer .send-button { width: 31px; height: 31px; border-radius: 7px; display: grid; place-items: center; background: var(--accent); color: white; }
 .composer-footer .send-button:disabled { background: #d5d1c8; }
+.mention-menu { position: absolute; z-index: 20; left: 0; right: 0; bottom: calc(100% + 7px); padding: 5px; border: 1px solid #d9d4c8; border-radius: 9px; background: #fff; box-shadow: 0 10px 30px rgba(50, 45, 34, .14); }
+.mention-menu button { width: 100%; display: flex; align-items: center; gap: 9px; padding: 7px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.mention-menu button:hover, .mention-menu button.active { background: #f2efe8; }
+.mention-menu button > span:last-child { min-width: 0; display: grid; gap: 1px; }
+.mention-menu strong, .mention-menu small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-menu small { color: #817b70; font-size: 9px; }
+.mention-avatar { width: 25px; height: 25px; flex: 0 0 auto; font-size: 8px; }
+.reset-chat-button { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #d8d2c6; border-radius: 6px; padding: 4px 7px; background: #fff; color: #7e766b; font-size: 9px; cursor: pointer; }
+.reset-chat-button:disabled { opacity: .45; cursor: default; }
+.chat-reset-confirmation { display: flex; align-items: center; gap: 5px; padding: 4px; border: 1px solid #dfc9bf; border-radius: 7px; background: #fff8f5; }
+.chat-reset-confirmation > span { color: #855b4b; }
+.chat-reset-confirmation button { min-height: 24px; padding: 3px 7px; font-size: 9px; }
 
 .participant-list { padding: 8px; }
 .participant { background: #faf9f5; border: 1px solid #e0dcd1; border-radius: 7px; margin-bottom: 8px; padding: 10px; }

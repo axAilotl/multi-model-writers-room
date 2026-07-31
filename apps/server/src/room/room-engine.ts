@@ -13,6 +13,9 @@ import type {
 } from "../tools/room-tools.js";
 import { assembleAgentMessages } from "./context-assembler.js";
 
+const MAX_TOOL_ROUNDS = 8;
+const MAX_TOOL_CALLS = 24;
+
 interface ActiveGeneration {
   roomId: string;
   agentId: string;
@@ -119,7 +122,9 @@ export class RoomEngine {
       );
       const conversation = [...request.messages];
       let totalToolCalls = 0;
-      for (let round = 0; round < 4; round += 1) {
+      // Permit MAX_TOOL_ROUNDS executions plus one final provider turn in which
+      // the model turns the gathered evidence into its public response.
+      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
         const calls = new Map<string, {
           id: string;
           name: string;
@@ -150,8 +155,12 @@ export class RoomEngine {
         if (calls.size === 0) break;
         totalToolCalls += calls.size;
         if (!this.tools) throw new Error("Provider requested a tool but no tool executor is configured");
-        if (totalToolCalls > 12) throw new Error("Generation exceeded the 12 tool-call limit");
-        if (round === 3) throw new Error("Generation exceeded the four tool-round limit");
+        if (totalToolCalls > MAX_TOOL_CALLS) {
+          throw new Error(`Generation exceeded the ${MAX_TOOL_CALLS} tool-call limit`);
+        }
+        if (round === MAX_TOOL_ROUNDS) {
+          throw new Error(`Generation exceeded the ${MAX_TOOL_ROUNDS} tool-round limit`);
+        }
         const requestedCalls = [...calls.values()];
         conversation.push({
           role: "assistant",

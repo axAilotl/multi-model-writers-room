@@ -227,7 +227,7 @@ export class WorkspaceService {
     return this.listArtifacts(roomId)
       .filter(artifact => artifact.ingestionStatus === "ready")
       .map(artifact => [
-        `[${artifact.filename}]`,
+        `[${artifact.filename} | artifact_id: ${artifact.id}]`,
         `Summary: ${artifact.summary}`,
         artifact.outline ? `Sections: ${artifact.outline}` : ""
       ].filter(Boolean).join("\n"))

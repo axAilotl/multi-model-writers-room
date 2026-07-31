@@ -336,6 +336,44 @@ try {
 
   await page.locator(".toggle-label .toggle").click();
   await page.locator(".toggle-label .toggle:not(.on)").waitFor();
+
+  await page.getByRole("button", { name: "Open settings" }).click();
+  await page.getByRole("button", { name: "Voice templates" }).click();
+  await page.locator(".template-list button").filter({
+    hasText: "Browser Product Critic"
+  }).click();
+  await page.getByLabel("Voice name").fill("Browser Reviewer");
+  await page.getByRole("button", { name: "Save template" }).click();
+  await page.getByText("Saved", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await page.locator(".participant").filter({ hasText: "Browser Reviewer" }).waitFor();
+  assert.equal(
+    await page.locator(".participant").filter({ hasText: "Browser Critic" }).count(),
+    0,
+    "The linked room participant kept the old voice-template name"
+  );
+
+  const mentionComposer = page.locator(".composer textarea");
+  await mentionComposer.fill("@Browser R");
+  const reviewerMention = page.getByRole("option", { name: /Browser Reviewer/ });
+  await reviewerMention.waitFor();
+  await reviewerMention.click();
+  assert.equal(await mentionComposer.inputValue(), "@Browser Reviewer ");
+  await mentionComposer.fill("@Browser Reviewer inspect this directly.");
+  await mentionComposer.press("Enter");
+  await page.locator(".human-message").filter({
+    hasText: "@Browser Reviewer inspect this directly."
+  }).waitFor();
+  const linkedReviewer = runtime.store.getSnapshot(workspaceRoom.id).agents.find(
+    agent => agent.name === "Browser Reviewer"
+  );
+  assert.ok(linkedReviewer, "Renamed linked voice was not persisted in the room");
+  assert.deepEqual(
+    runtime.store.getTailMessage(workspaceRoom.id)?.mentionedAgentIds,
+    [linkedReviewer.id],
+    "The selected @ mention was not persisted as a direct target"
+  );
+
   const prompt = "Identify one concrete failure mode in this room design.";
   await page.locator(".composer textarea").fill(prompt);
   await page.locator(".composer textarea").press("Enter");
@@ -398,13 +436,13 @@ try {
   );
 
   await page.getByRole("button", {
-    name: "Remove Browser Critic from room"
+    name: "Remove Browser Reviewer from room"
   }).click();
   const removalConfirmation = page.getByRole("group", {
-    name: "Remove Browser Critic?"
+    name: "Remove Browser Reviewer?"
   });
   await removalConfirmation.getByRole("button", { name: "Remove" }).click();
-  await page.locator(".participant").filter({ hasText: "Browser Critic" }).waitFor({
+  await page.locator(".participant").filter({ hasText: "Browser Reviewer" }).waitFor({
     state: "detached"
   });
   assert.equal(await page.locator(".participant").count(), 1, "Participant was not removed");
@@ -421,6 +459,22 @@ try {
     /width:\s*0%/,
     "Room pressure did not reset after deleting the last agent message"
   );
+
+  await page.getByRole("button", { name: "Reset chat" }).click();
+  await page.getByRole("group", { name: "Reset chat?" })
+    .getByRole("button", { name: "Confirm reset" }).click();
+  await waitForCondition(
+    async () => await page.locator(".human-message").count() === 0,
+    "Reset left human messages behind"
+  );
+  assert.equal(await page.locator(".agent-message").count(), 0, "Reset left agent messages behind");
+  assert.equal(await page.locator(".participant").count(), 1, "Reset removed a participant");
+  await page.locator(".artifact").filter({ hasText: "retry-evidence.txt" }).waitFor();
+  const resetSnapshot = runtime.store.getSnapshot(browserRoom.id);
+  assert.equal(resetSnapshot.messages.length, 0, "Reset did not clear persisted messages");
+  assert.equal(resetSnapshot.generations.length, 0, "Reset did not clear generations");
+  assert.equal(resetSnapshot.agents.length, 1, "Reset did not retain participants");
+  assert.equal(resetSnapshot.artifacts.length, 1, "Reset did not retain artifacts");
 
   await page.getByRole("button", { name: "Manage rooms" }).click();
   await page.getByRole("button", { name: "Switch to Archive room" }).click();
@@ -456,6 +510,10 @@ try {
     workspaceDragDropUploaded: true,
     workspaceArtifactRetried: true,
     workspaceArtifactDeleted: true,
+    directMentionAutocomplete: true,
+    directMentionPersisted: true,
+    linkedVoiceRenamePropagated: true,
+    chatResetRetainedRoomResources: true,
     consoleErrors: 0,
     pageErrors: 0,
     failedApiResponses: 0,

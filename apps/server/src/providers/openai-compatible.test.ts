@@ -95,6 +95,30 @@ describe("OpenAI-compatible provider seam", () => {
     );
   });
 
+  it("does not duplicate reasoning mirrored in provider-specific detail fields", async () => {
+    const body = [
+      'data: {"choices":[{"delta":{"reasoning":"Think once.","reasoning_details":[{"type":"reasoning.text","text":"Think once."}]}}]}',
+      "data: [DONE]",
+      ""
+    ].join("\n\n");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }));
+    const provider = new OpenAiCompatibleProvider({
+      id: "generic",
+      baseUrl: "http://model.test/v1",
+      fetcher
+    });
+
+    const events = [];
+    for await (const event of provider.streamChat(request)) events.push(event);
+
+    expect(events.filter(event => event.type === "reasoning-delta")).toEqual([
+      { type: "reasoning-delta", text: "Think once." }
+    ]);
+  });
+
   it("propagates aborts without retrying or inventing a completion event", async () => {
     const controller = new AbortController();
     controller.abort();

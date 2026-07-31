@@ -580,6 +580,7 @@ function AddAgent({ roomId, onAdded, onClose }: {
     const id = `${draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${Date.now().toString(36)}`;
     const result = agentDefinitionSchema.safeParse({
       id,
+      ...(templateId ? { voiceTemplateId: templateId } : {}),
       name: draft.name,
       description: draft.description,
       provider: draft.provider,
@@ -1094,6 +1095,8 @@ export default function App() {
   const [showAgent, setShowAgent] = useState(false);
   const [showRooms, setShowRooms] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [confirmingChatReset, setConfirmingChatReset] = useState(false);
+  const [mentionIndex, setMentionIndex] = useState(0);
   const latestSequenceRef = useRef(0);
   const refreshRequestRef = useRef(0);
   const activeRoomIdRef = useRef<string | undefined>(undefined);
@@ -1170,10 +1173,41 @@ export default function App() {
 
   const mentions = useMemo(() => {
     if (!snapshot) return [];
-    return snapshot.agents
-      .filter(agent => composer.toLowerCase().includes(`@${agent.name.toLowerCase()}`))
-      .map(agent => agent.id);
+    const content = composer.toLowerCase();
+    const mentioned = new Set<string>();
+    for (let index = content.indexOf("@"); index >= 0; index = content.indexOf("@", index + 1)) {
+      const match = [...snapshot.agents]
+        .sort((left, right) => right.name.length - left.name.length)
+        .find(agent => {
+          const token = `@${agent.name.toLowerCase()}`;
+          if (!content.startsWith(token, index)) return false;
+          const following = content[index + token.length];
+          return following === undefined || /\s|[.,!?;:()[\]{}]/.test(following);
+        });
+      if (match) mentioned.add(match.id);
+    }
+    return [...mentioned];
   }, [composer, snapshot]);
+
+  const mentionSuggestions = useMemo(() => {
+    if (!snapshot) return [];
+    const match = composer.match(/(?:^|\s)@([^@\n]*)$/);
+    if (!match) return [];
+    const query = (match[1] ?? "").trim().toLowerCase();
+    return snapshot.agents.filter(agent =>
+      agent.name.toLowerCase().includes(query)
+    );
+  }, [composer, snapshot]);
+
+  function insertMention(agent: AgentDefinition) {
+    setComposer(current => {
+      const match = current.match(/(?:^|\s)@([^@\n]*)$/);
+      if (!match || match.index === undefined) return `${current}@${agent.name} `;
+      const atIndex = current.indexOf("@", match.index);
+      return `${current.slice(0, atIndex)}@${agent.name} `;
+    });
+    setMentionIndex(0);
+  }
 
   async function runRoomAction(
     action: () => Promise<unknown>,
@@ -1334,6 +1368,33 @@ export default function App() {
             <div className="run-limits">
               <span>{snapshot.room.settings.maxResponders} responders</span>
               <span>{snapshot.room.settings.maxAutonomousWaves} wave cap</span>
+              {confirmingChatReset ? (
+                <div className="chat-reset-confirmation" role="group" aria-label="Reset chat?">
+                  <span>Clear chat, keep voices and files?</span>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setConfirmingChatReset(false)}
+                  >Cancel</button>
+                  <button
+                    type="button"
+                    className="danger-button"
+                    disabled={busy}
+                    onClick={() => {
+                      void runRoomAction(() => api.resetChat(snapshot.room.id)).then(reset => {
+                        if (reset) setConfirmingChatReset(false);
+                      });
+                    }}
+                  ><RotateCcw size={12} /> Confirm reset</button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="reset-chat-button"
+                  disabled={busy || snapshot.messages.length === 0}
+                  onClick={() => setConfirmingChatReset(true)}
+                ><RotateCcw size={12} /> Reset chat</button>
+              )}
             </div>
           </div>
           <Conversation
@@ -1352,12 +1413,52 @@ export default function App() {
               void runRoomAction(() => api.sendMessage(snapshot.room.id, content, mentions));
             }}
           >
+            {mentionSuggestions.length > 0 && (
+              <div className="mention-menu" role="listbox" aria-label="Mention a participant">
+                {mentionSuggestions.map((agent, index) => (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    role="option"
+                    aria-selected={index === mentionIndex}
+                    className={index === mentionIndex ? "active" : ""}
+                    onMouseDown={event => event.preventDefault()}
+                    onClick={() => insertMention(agent)}
+                  >
+                    <span className="avatar mention-avatar" style={{ background: agentColor(snapshot, agent.id) }}>
+                      {initials(agent.name)}
+                    </span>
+                    <span><strong>{agent.name}</strong><small>{agent.description}</small></span>
+                  </button>
+                ))}
+              </div>
+            )}
             <textarea
               value={composer}
-              onChange={event => setComposer(event.target.value)}
-              placeholder="Put something on the table…"
+              onChange={event => {
+                setComposer(event.target.value);
+                setMentionIndex(0);
+              }}
+              placeholder="Put something on the table… Use @ to address a voice directly."
               rows={2}
               onKeyDown={event => {
+                if (mentionSuggestions.length > 0 && event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setMentionIndex(current => (current + 1) % mentionSuggestions.length);
+                  return;
+                }
+                if (mentionSuggestions.length > 0 && event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setMentionIndex(current =>
+                    (current - 1 + mentionSuggestions.length) % mentionSuggestions.length
+                  );
+                  return;
+                }
+                if (mentionSuggestions.length > 0 && event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  insertMention(mentionSuggestions[mentionIndex] ?? mentionSuggestions[0]!);
+                  return;
+                }
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
                   event.currentTarget.form?.requestSubmit();

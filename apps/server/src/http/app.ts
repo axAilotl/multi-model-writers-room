@@ -273,6 +273,23 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
   );
 
   application.post(
+    "/api/v1/rooms/:roomId/chat/reset",
+    asyncRoute(async (request, response) => {
+      const roomId = String(request.params.roomId);
+      const current = options.store.getRoom(roomId);
+      const resumeAfterReset = current.status === "running";
+      if (resumeAfterReset) options.store.updateRoom(roomId, { status: "paused" });
+      await engine.interruptRoomAndWait(roomId);
+      options.store.resetChat(roomId);
+      const room = resumeAfterReset
+        ? options.store.updateRoom(roomId, { status: "running" })
+        : options.store.getRoom(roomId);
+      options.store.appendRoomEvent(roomId, { type: "room.snapshot", room });
+      response.json({ reset: true, room });
+    })
+  );
+
+  application.post(
     "/api/v1/rooms/:roomId/agents",
     asyncRoute(async (request, response) => {
       const submitted = agentDefinitionSchema.parse(request.body);

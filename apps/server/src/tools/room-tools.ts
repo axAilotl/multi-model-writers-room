@@ -81,11 +81,11 @@ type ToolName = keyof typeof schemas;
 
 const descriptions: Record<ToolName, string> = {
   list_workspace: "List ready workspace artifacts and their summaries.",
-  get_artifact_summary: "Read one artifact's summary, outline, and metadata.",
+  get_artifact_summary: "Read one artifact's summary, outline, and metadata. Pass the stable artifact_id shown in the workspace manifest or returned by list_workspace, not its filename.",
   search_workspace: "Hybrid lexical and semantic search over workspace chunks.",
   find_exact_text: "Find exact text fragments in workspace chunks.",
   read_artifact_chunk: "Read one cited workspace chunk by stable ID.",
-  read_artifact_range: "Read a contiguous ordinal range from one artifact.",
+  read_artifact_range: "Read a contiguous ordinal range from one artifact. Pass the stable artifact_id shown in the workspace manifest or returned by list_workspace, not its filename.",
   read_shared_scratchpad: "Read current non-archived shared room notes.",
   append_shared_note: "Append a concise shared note with attribution.",
   update_shared_note: "Update a shared note.",

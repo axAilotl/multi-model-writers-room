@@ -83,6 +83,7 @@ export class RoomStore {
     this.database.pragma("foreign_keys = ON");
     this.database.pragma("busy_timeout = 5000");
     migrate(this.database);
+    this.reconcileVoiceTemplateLinks();
     this.reconcileInterruptedWork();
   }
 
@@ -353,12 +354,86 @@ export class RoomStore {
       }),
       updatedAt
     });
-    this.database.prepare(`
-      UPDATE voice_templates
-      SET payload_json = ?, updated_at = ?
-      WHERE id = ?
-    `).run(JSON.stringify(template), updatedAt, templateId);
+    const affectedRoomIds = new Set<string>();
+    this.database.transaction(() => {
+      this.database.prepare(`
+        UPDATE voice_templates
+        SET payload_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(JSON.stringify(template), updatedAt, templateId);
+
+      const candidates = this.database.prepare(`
+        SELECT id, definition_json FROM agents
+      `).all() as Array<{ id: string; definition_json: string }>;
+      for (const candidate of candidates) {
+        const agent = agentDefinitionSchema.parse(JSON.parse(candidate.definition_json));
+        const linked = agent.voiceTemplateId === templateId;
+        const legacyTemplateInstance = agent.voiceTemplateId === undefined &&
+          agent.systemPrompt === current.systemPrompt;
+        if (!linked && !legacyTemplateInstance) continue;
+        const updatedAgent = this.applyVoiceTemplate(agent, template);
+        this.database.prepare(`
+          UPDATE agents SET definition_json = ?, updated_at = ? WHERE id = ?
+        `).run(JSON.stringify(updatedAgent), updatedAt, agent.id);
+        const memberships = this.database.prepare(`
+          SELECT room_id FROM room_agents WHERE agent_id = ?
+        `).all(agent.id) as Array<{ room_id: string }>;
+        for (const membership of memberships) affectedRoomIds.add(membership.room_id);
+      }
+    })();
+    for (const roomId of affectedRoomIds) {
+      const room = this.getRoom(roomId);
+      this.appendRoomEvent(roomId, { type: "room.snapshot", room });
+    }
     return template;
+  }
+
+  private applyVoiceTemplate(
+    agent: AgentDefinition,
+    template: VoiceTemplate
+  ): AgentDefinition {
+    return agentDefinitionSchema.parse({
+      ...agent,
+      voiceTemplateId: template.id,
+      name: template.name,
+      description: template.description,
+      systemPrompt: template.systemPrompt,
+      personaPrompt: template.personaPrompt,
+      temperature: template.temperature,
+      topP: template.topP,
+      maxOutputTokens: template.maxOutputTokens,
+      reasoning: template.reasoning,
+      tools: template.tools,
+      contextBudget: template.contextBudget
+    });
+  }
+
+  private reconcileVoiceTemplateLinks(): void {
+    const templates = this.database.prepare(`
+      SELECT payload_json FROM voice_templates
+    `).all().map(row =>
+      voiceTemplateSchema.parse(JSON.parse((row as JsonRow).payload_json))
+    );
+    if (templates.length === 0) return;
+    const agents = this.database.prepare(`
+      SELECT id, definition_json FROM agents
+    `).all() as Array<{ id: string; definition_json: string }>;
+    const now = new Date().toISOString();
+    const update = this.database.prepare(`
+      UPDATE agents SET definition_json = ?, updated_at = ? WHERE id = ?
+    `);
+    this.database.transaction(() => {
+      for (const row of agents) {
+        const agent = agentDefinitionSchema.parse(JSON.parse(row.definition_json));
+        if (agent.voiceTemplateId !== undefined) continue;
+        const matches = templates.filter(template =>
+          template.systemPrompt === agent.systemPrompt
+        );
+        if (matches.length !== 1) continue;
+        const linked = this.applyVoiceTemplate(agent, matches[0]!);
+        update.run(JSON.stringify(linked), now, agent.id);
+      }
+    })();
   }
 
   deleteVoiceTemplate(templateId: string): VoiceTemplate {
@@ -844,6 +919,46 @@ export class RoomStore {
     return this.listMessages(roomId)
       .filter(message => message.lifecycle === "active")
       .at(-1);
+  }
+
+  resetChat(roomId: string): Room {
+    const room = this.getRoom(roomId);
+    const now = new Date().toISOString();
+    this.database.transaction(() => {
+      this.database.prepare(
+        "DELETE FROM scheduler_waves WHERE room_id = ?"
+      ).run(roomId);
+      // Deleting messages cascades through generations, generation events,
+      // citations, and tool calls while leaving workspace artifacts untouched.
+      this.database.prepare(
+        "DELETE FROM messages WHERE room_id = ?"
+      ).run(roomId);
+      this.database.prepare(
+        "DELETE FROM room_events WHERE room_id = ?"
+      ).run(roomId);
+      const runtimes = this.database.prepare(`
+        SELECT agent_id, payload_json FROM agent_runtime_state WHERE room_id = ?
+      `).all(roomId) as Array<{ agent_id: string; payload_json: string }>;
+      const updateRuntime = this.database.prepare(`
+        UPDATE agent_runtime_state
+        SET payload_json = ?, updated_at = ?
+        WHERE room_id = ? AND agent_id = ?
+      `);
+      for (const row of runtimes) {
+        const current = agentRuntimeStateSchema.parse(JSON.parse(row.payload_json));
+        const reset = agentRuntimeStateSchema.parse({
+          roomId,
+          agentId: row.agent_id,
+          fatigue: 0,
+          activation: 0,
+          consecutiveTurns: 0,
+          muted: current.muted
+        });
+        updateRuntime.run(JSON.stringify(reset), now, roomId, row.agent_id);
+      }
+    })();
+    this.appendRoomEvent(roomId, { type: "room.snapshot", room });
+    return room;
   }
 
   getEvents(roomId: string, afterSequence: number): RoomStreamEvent[] {

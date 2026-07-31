@@ -106,11 +106,13 @@ export class ConversationScheduler {
         return { waves, replies, stopReason: "reply_cap" };
       }
       const mentioned = new Set(trigger.mentionedAgentIds);
+      const directHumanTargets = trigger.authorType === "human" && mentioned.size > 0;
       const pressure = assessRoomPressure(snapshot.messages, this.now());
       if (pressure.hardSuppressed && mentioned.size === 0) {
         return { waves, replies, stopReason: "pressure" };
       }
       const candidates = await Promise.all(snapshot.agents.map(async agent => {
+        if (directHumanTargets && !mentioned.has(agent.id)) return undefined;
         const storedRuntime = this.dependencies.store.getRuntime(roomId, agent.id);
         const runtime = recoverIdle({
           runtime: storedRuntime,
