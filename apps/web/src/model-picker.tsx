@@ -1,13 +1,10 @@
 import { LoaderCircle, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId } from "react";
 import type {
   AgentDefinition,
   ModelCapabilities
 } from "@writers-room/contracts";
-import {
-  useFilteredModels,
-  useProviderModels
-} from "./use-provider-models.js";
+import { useProviderModels } from "./use-provider-models.js";
 
 export function ModelPicker({
   provider,
@@ -22,7 +19,7 @@ export function ModelPicker({
   onCapabilities?: (capabilities: ModelCapabilities | undefined) => void;
   name?: string;
 }) {
-  const [query, setQuery] = useState("");
+  const listId = useId();
   const { models, loading, error, refresh } = useProviderModels(provider);
   const selected = models.find(model => model.id === value);
 
@@ -30,19 +27,17 @@ export function ModelPicker({
     onCapabilities?.(selected?.capabilities);
   }, [selected, onCapabilities]);
 
-  const filtered = useFilteredModels(models, query);
-  const visible = selected && !filtered.some(model => model.id === selected.id)
-    ? [selected, ...filtered]
-    : filtered;
-
   return (
     <div className="model-picker">
       <div className="model-filter">
         <input
-          value={query}
-          onChange={event => setQuery(event.target.value)}
-          placeholder={loading ? "Loading provider models…" : "Filter models…"}
-          aria-label="Filter models"
+          name={name}
+          required
+          list={listId}
+          value={value}
+          onChange={event => onChange(event.target.value)}
+          placeholder={loading ? "Loading provider models…" : "Type to filter models…"}
+          aria-label="Model"
         />
         <button
           type="button"
@@ -55,32 +50,11 @@ export function ModelPicker({
             : <RefreshCw size={13} />}
         </button>
       </div>
-      {models.length > 0 ? (
-        <select
-          name={name}
-          required
-          value={value}
-          onChange={event => onChange(event.target.value)}
-        >
-          {!value && <option value="">Select a model…</option>}
-          {value && !selected && (
-            <option value={value}>Unavailable/custom · {value}</option>
-          )}
-          {visible.map(model => (
-            <option value={model.id} key={model.id}>
-              {model.name} · {model.id}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          name={name}
-          required
-          value={value}
-          onChange={event => onChange(event.target.value)}
-          placeholder="provider/model-id"
-        />
-      )}
+      <datalist id={listId}>
+        {models.map(model => (
+          <option value={model.id} label={model.name} key={model.id} />
+        ))}
+      </datalist>
       {error && <small className="field-error">{error}</small>}
       {selected && (
         <div className="capability-pills">

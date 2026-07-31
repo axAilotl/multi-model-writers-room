@@ -34,6 +34,7 @@ export function SettingsPage({
     closeButtonRef.current?.focus();
 
     function onKeyDown(event: KeyboardEvent) {
+      if (dialogRef.current?.querySelector(".voice-generator-modal")) return;
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();

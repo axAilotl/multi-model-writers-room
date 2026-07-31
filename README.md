@@ -9,7 +9,8 @@ final synthesis.
 ## What works
 
 - Three to five OpenRouter, Ollama, or OpenAI-compatible participants
-- Live provider-backed model catalogs with searchable OpenRouter selection
+- Live provider-backed model catalogs, searchable single-field model pickers,
+  and a persistent fallback model
 - Manual speaker invitation and bounded automatic parallel response waves
 - Streaming text, provider-returned reasoning, usage, routing, and interruption
 - Durable SQLite transcript, runtime state, generation events, and restart
@@ -20,8 +21,8 @@ final synthesis.
 - In-process local ONNX embeddings and artifact summaries isolated in a worker
   thread
 - A three-panel React room interface
-- A settings page for room pacing, provider inspection, and reusable voice
-  templates
+- A settings page for room pacing, provider inspection, reusable voice
+  templates, and AI-generated editable voice drafts
 
 The release intentionally omits arbitrary transcript editing, branching,
 private notebooks, authentication, code mutation, repository/shell tools, and
@@ -74,7 +75,7 @@ data/
 
 Change the root with `WRITERS_ROOM_DATA_DIR`. SQLite runs in WAL mode and is the
 sole authority for rooms, messages, generations, runtime state, artifacts,
-chunks, citations, tool calls, and scratchpad notes.
+chunks, citations, tool calls, scratchpad notes, and application defaults.
 
 ## Verification
 

@@ -1,5 +1,6 @@
 import type {
   AgentDefinition,
+  DefaultModelSelection,
   ModelDescriptor,
   Room,
   RoomSettings,
@@ -7,6 +8,7 @@ import type {
   VoiceTemplate,
   VoiceTemplateInput,
   VoiceTemplatePatch,
+  VoiceTemplateGenerationRequest,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
 
@@ -43,6 +45,21 @@ export const api = {
     }>(`/api/v1/providers/${encodeURIComponent(provider)}/models`)).models;
   },
 
+  async getDefaultModel(): Promise<DefaultModelSelection | undefined> {
+    return (await requestJson<{ defaultModel: DefaultModelSelection | null }>(
+      "/api/v1/settings/default-model"
+    )).defaultModel ?? undefined;
+  },
+
+  async setDefaultModel(
+    selection: DefaultModelSelection
+  ): Promise<DefaultModelSelection> {
+    return (await requestJson<{ defaultModel: DefaultModelSelection }>(
+      "/api/v1/settings/default-model",
+      { method: "PUT", body: JSON.stringify(selection) }
+    )).defaultModel;
+  },
+
   async listVoiceTemplates(): Promise<VoiceTemplate[]> {
     return (await requestJson<{ templates: VoiceTemplate[] }>(
       "/api/v1/voice-templates"
@@ -52,6 +69,15 @@ export const api = {
   async createVoiceTemplate(input: VoiceTemplateInput): Promise<VoiceTemplate> {
     return (await requestJson<{ template: VoiceTemplate }>(
       "/api/v1/voice-templates",
+      { method: "POST", body: JSON.stringify(input) }
+    )).template;
+  },
+
+  async generateVoiceTemplate(
+    input: VoiceTemplateGenerationRequest
+  ): Promise<VoiceTemplateInput> {
+    return (await requestJson<{ template: VoiceTemplateInput }>(
+      "/api/v1/voice-templates/generate",
       { method: "POST", body: JSON.stringify(input) }
     )).template;
   },

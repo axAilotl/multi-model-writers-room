@@ -42,6 +42,12 @@ export interface ModelDescriptor {
   capabilities: ModelCapabilities;
 }
 
+export const defaultModelSelectionSchema = z.object({
+  provider: providerKindSchema,
+  modelId: z.string().trim().min(1)
+});
+export type DefaultModelSelection = z.infer<typeof defaultModelSelectionSchema>;
+
 export const contextBudgetSchema = z.object({
   softLimitTokens: z.number().int().positive(),
   hardLimitTokens: z.number().int().positive(),
@@ -78,6 +84,14 @@ export const voiceTemplateInputSchema = agentDefinitionSchema
     title: z.string().trim().min(1).max(120)
   });
 export type VoiceTemplateInput = z.infer<typeof voiceTemplateInputSchema>;
+
+export const voiceTemplateGenerationRequestSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  sourceText: z.string().trim().min(20).max(30_000)
+});
+export type VoiceTemplateGenerationRequest = z.infer<
+  typeof voiceTemplateGenerationRequestSchema
+>;
 
 // Keep PATCH parsing separate from `voiceTemplateInputSchema.partial()`.
 // Zod retains field defaults through `partial()`, which would turn omitted

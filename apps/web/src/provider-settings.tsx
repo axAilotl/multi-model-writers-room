@@ -1,6 +1,9 @@
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AgentDefinition } from "@writers-room/contracts";
+import type {
+  AgentDefinition,
+  DefaultModelSelection
+} from "@writers-room/contracts";
 import { api } from "./api.js";
 import { providerLabels } from "./provider-labels.js";
 import {
@@ -13,21 +16,47 @@ export function ProviderSettings() {
   const [selected, setSelected] =
     useState<AgentDefinition["provider"]>("openrouter");
   const [query, setQuery] = useState("");
+  const [defaultModel, setDefaultModel] = useState<DefaultModelSelection>();
+  const [savingDefaultId, setSavingDefaultId] = useState<string>();
+  const [settingsError, setSettingsError] = useState<string>();
   const { models, loading, error, refresh } = useProviderModels(selected);
 
   useEffect(() => {
     let active = true;
-    void api.health().then(health => {
-      if (!active) return;
-      setProviders(health.providers);
-      if (!health.providers.includes(selected) && health.providers[0]) {
-        setSelected(health.providers[0]);
-      }
-    });
+    void Promise.all([api.health(), api.getDefaultModel()])
+      .then(([health, savedDefault]) => {
+        if (!active) return;
+        setProviders(health.providers);
+        setDefaultModel(savedDefault);
+        if (!health.providers.includes("openrouter") && health.providers[0]) {
+          setSelected(health.providers[0]);
+        }
+      })
+      .catch(errorValue => {
+        if (active) {
+          setSettingsError(
+            errorValue instanceof Error ? errorValue.message : String(errorValue)
+          );
+        }
+      });
     return () => {
       active = false;
     };
-  }, [selected]);
+  }, []);
+
+  async function chooseDefault(modelId: string) {
+    setSavingDefaultId(modelId);
+    setSettingsError(undefined);
+    try {
+      setDefaultModel(await api.setDefaultModel({ provider: selected, modelId }));
+    } catch (errorValue) {
+      setSettingsError(
+        errorValue instanceof Error ? errorValue.message : String(errorValue)
+      );
+    } finally {
+      setSavingDefaultId(undefined);
+    }
+  }
 
   const visible = useFilteredModels(models, query);
 
@@ -38,6 +67,19 @@ export function ProviderSettings() {
           <span className="eyebrow">Server-side connections</span>
           <h2>Providers & models</h2>
           <p>Credentials remain in the local environment and are never sent to the browser.</p>
+        </div>
+      </div>
+      <div className="default-model-card">
+        <div>
+          <span className="eyebrow">Default fallback model</span>
+          {defaultModel ? (
+            <strong>
+              Current default · {providerLabels[defaultModel.provider]} / {defaultModel.modelId}
+            </strong>
+          ) : (
+            <strong>No fallback selected</strong>
+          )}
+          <p>Used for generated voice drafts and as the starting model for new voices.</p>
         </div>
       </div>
       <div className="provider-strip">
@@ -77,7 +119,9 @@ export function ProviderSettings() {
             </button>
           </div>
         </header>
-        {error && <div className="settings-error">{error}</div>}
+        {(error || settingsError) && (
+          <div className="settings-error">{settingsError ?? error}</div>
+        )}
         <div className="catalog-list">
           {visible.slice(0, 100).map(model => (
             <div key={model.id}>
@@ -85,6 +129,24 @@ export function ProviderSettings() {
               <span>{Math.round(model.capabilities.contextLength / 1_000)}k</span>
               <span>{model.capabilities.toolCalling ? "tools" : "text"}</span>
               <span>{model.capabilities.reasoningOutput ? "reasoning" : "—"}</span>
+              <button
+                type="button"
+                className={
+                  defaultModel?.provider === selected &&
+                  defaultModel.modelId === model.id
+                    ? "current"
+                    : ""
+                }
+                disabled={savingDefaultId !== undefined}
+                onClick={() => void chooseDefault(model.id)}
+              >
+                {savingDefaultId === model.id
+                  ? <LoaderCircle size={12} className="spin" />
+                  : defaultModel?.provider === selected &&
+                      defaultModel.modelId === model.id
+                    ? "Default"
+                    : "Set default"}
+              </button>
             </div>
           ))}
         </div>

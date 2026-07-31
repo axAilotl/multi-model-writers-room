@@ -4,7 +4,9 @@ import multer from "multer";
 import { z } from "zod";
 import {
   agentDefinitionSchema,
+  defaultModelSelectionSchema,
   roomSettingsSchema,
+  voiceTemplateGenerationRequestSchema,
   voiceTemplateInputSchema,
   voiceTemplatePatchSchema
 } from "@writers-room/contracts";
@@ -15,6 +17,7 @@ import { ConversationScheduler } from "../scheduler/scheduler.js";
 import { RoomStore } from "../storage/room-store.js";
 import type { ToolExecutor } from "../tools/room-tools.js";
 import type { WorkspaceService } from "../workspace/workspace-service.js";
+import { generateVoiceTemplate } from "../voices/voice-template-generator.js";
 
 interface ApplicationOptions {
   store: RoomStore;
@@ -88,6 +91,34 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     })
   );
 
+  application.get("/api/v1/settings/default-model", (_request, response) => {
+    response.json({ defaultModel: options.store.getDefaultModel() ?? null });
+  });
+
+  application.put(
+    "/api/v1/settings/default-model",
+    asyncRoute(async (request, response) => {
+      const selection = defaultModelSelectionSchema.parse(request.body);
+      const provider = options.providers.get(selection.provider);
+      if (!provider) {
+        response.status(400).json({
+          error: `Provider is not configured: ${selection.provider}`
+        });
+        return;
+      }
+      const models = await provider.listModels();
+      if (!models.some(model => model.id === selection.modelId)) {
+        response.status(400).json({
+          error: `Model is not available from ${selection.provider}: ${selection.modelId}`
+        });
+        return;
+      }
+      response.json({
+        defaultModel: options.store.setDefaultModel(selection)
+      });
+    })
+  );
+
   application.get("/api/v1/voice-templates", (_request, response) => {
     response.json({ templates: options.store.listVoiceTemplates() });
   });
@@ -98,6 +129,34 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       template: options.store.createVoiceTemplate(input)
     });
   });
+
+  application.post(
+    "/api/v1/voice-templates/generate",
+    asyncRoute(async (request, response) => {
+      const generationRequest = voiceTemplateGenerationRequestSchema.parse(request.body);
+      const selection = options.store.getDefaultModel();
+      if (!selection) {
+        response.status(409).json({
+          error: "Choose a default model in Settings before generating a voice"
+        });
+        return;
+      }
+      const provider = options.providers.get(selection.provider);
+      if (!provider) {
+        response.status(409).json({
+          error: `The default provider is not configured: ${selection.provider}`
+        });
+        return;
+      }
+      response.json({
+        template: await generateVoiceTemplate({
+          request: generationRequest,
+          selection,
+          provider
+        })
+      });
+    })
+  );
 
   application.patch("/api/v1/voice-templates/:templateId", (request, response) => {
     const patch = voiceTemplatePatchSchema.parse(request.body);

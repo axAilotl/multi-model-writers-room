@@ -355,9 +355,22 @@ function AddAgent({ roomId, onAdded, onClose }: {
 
   useEffect(() => {
     let cancelled = false;
-    void api.listVoiceTemplates()
-      .then(nextTemplates => {
-        if (!cancelled) setTemplates(nextTemplates);
+    void Promise.all([
+      api.listVoiceTemplates(),
+      api.getDefaultModel()
+    ])
+      .then(([nextTemplates, defaultModel]) => {
+        if (cancelled) return;
+        setTemplates(nextTemplates);
+        if (defaultModel) {
+          setDraft(current => current.modelId
+            ? current
+            : {
+                ...current,
+                provider: defaultModel.provider,
+                modelId: defaultModel.modelId
+              });
+        }
       })
       .catch(errorValue => {
         if (!cancelled) {
@@ -411,7 +424,7 @@ function AddAgent({ roomId, onAdded, onClose }: {
     <div className="modal-backdrop" onMouseDown={event => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <form className="agent-modal" onSubmit={submit}>
+      <form className="agent-modal agent-modal-wide" onSubmit={submit}>
         <header>
           <div><Bot size={18} /> Add a voice</div>
           <button type="button" className="icon-button" onClick={onClose}><X size={16} /></button>

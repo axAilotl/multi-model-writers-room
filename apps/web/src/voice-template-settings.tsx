@@ -3,17 +3,20 @@ import {
   LoaderCircle,
   Plus,
   Save,
+  Sparkles,
   Trash2
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import {
   defaultRoomToolNames,
+  type DefaultModelSelection,
   type VoiceTemplate,
   type VoiceTemplateInput
 } from "@writers-room/contracts";
 import { api } from "./api.js";
 import { ModelPicker } from "./model-picker.js";
 import { providerLabels } from "./provider-labels.js";
+import { VoiceGeneratorModal } from "./voice-generator-modal.js";
 import {
   blankVoiceTemplate,
   voiceTemplateInput
@@ -25,12 +28,25 @@ export function VoiceTemplateEditor() {
   const [draft, setDraft] = useState<VoiceTemplateInput>(blankVoiceTemplate);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [defaultModel, setDefaultModel] = useState<DefaultModelSelection>();
+  const [showGenerator, setShowGenerator] = useState(false);
 
   useEffect(() => {
     let active = true;
-    void api.listVoiceTemplates()
-      .then(nextTemplates => {
-        if (active) setTemplates(nextTemplates);
+    void Promise.all([api.listVoiceTemplates(), api.getDefaultModel()])
+      .then(([nextTemplates, savedDefault]) => {
+        if (!active) return;
+        setTemplates(nextTemplates);
+        setDefaultModel(savedDefault);
+        if (savedDefault) {
+          setDraft(current => current.modelId
+            ? current
+            : {
+                ...current,
+                provider: savedDefault.provider,
+                modelId: savedDefault.modelId
+              });
+        }
       })
       .catch(errorValue => {
         if (active) {
@@ -57,7 +73,7 @@ export function VoiceTemplateEditor() {
 
   function createNew() {
     setSelectedId(undefined);
-    setDraft(blankVoiceTemplate());
+    setDraft(blankVoiceTemplate(defaultModel));
     setError(undefined);
   }
 
@@ -110,9 +126,14 @@ export function VoiceTemplateEditor() {
           <h2>Voice templates</h2>
           <p>Save a point of view once, then bring it into any room with its model and behavior intact.</p>
         </div>
-        <button className="secondary-button" onClick={createNew}>
-          <Plus size={14} /> New template
-        </button>
+        <div className="settings-heading-actions">
+          <button className="secondary-button" onClick={() => setShowGenerator(true)}>
+            <Sparkles size={14} /> Generate with AI
+          </button>
+          <button className="secondary-button" onClick={createNew}>
+            <Plus size={14} /> New template
+          </button>
+        </div>
       </div>
       <div className="template-workbench">
         <aside className="template-list">
@@ -378,6 +399,18 @@ export function VoiceTemplateEditor() {
           </footer>
         </form>
       </div>
+      {showGenerator && (
+        <VoiceGeneratorModal
+          {...(defaultModel === undefined ? {} : { defaultModel })}
+          onClose={() => setShowGenerator(false)}
+          onGenerated={template => {
+            setSelectedId(undefined);
+            setDraft(template);
+            setError(undefined);
+            setShowGenerator(false);
+          }}
+        />
+      )}
     </section>
   );
 }

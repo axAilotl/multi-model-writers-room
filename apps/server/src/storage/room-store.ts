@@ -5,6 +5,7 @@ import {
   agentDefinitionSchema,
   agentRuntimeStateSchema,
   artifactSchema,
+  defaultModelSelectionSchema,
   defaultRoomSettings,
   generationRecordSchema,
   roomMessageSchema,
@@ -15,6 +16,7 @@ import {
   voiceTemplateSchema,
   type AgentDefinition,
   type AgentRuntimeState,
+  type DefaultModelSelection,
   type GenerationRecord,
   type Room,
   type RoomMessage,
@@ -222,6 +224,27 @@ export class RoomStore {
     `).all(roomId).map(row =>
       agentDefinitionSchema.parse(JSON.parse((row as JsonRow).payload_json))
     );
+  }
+
+  getDefaultModel(): DefaultModelSelection | undefined {
+    const row = this.database.prepare(
+      "SELECT payload_json FROM application_settings WHERE key = ?"
+    ).get("default_model") as JsonRow | undefined;
+    return row === undefined
+      ? undefined
+      : defaultModelSelectionSchema.parse(JSON.parse(row.payload_json));
+  }
+
+  setDefaultModel(selection: DefaultModelSelection): DefaultModelSelection {
+    const parsed = defaultModelSelectionSchema.parse(selection);
+    this.database.prepare(`
+      INSERT INTO application_settings(key, payload_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+    `).run("default_model", JSON.stringify(parsed), new Date().toISOString());
+    return parsed;
   }
 
   createVoiceTemplate(input: VoiceTemplateInput): VoiceTemplate {

@@ -185,6 +185,15 @@ const migrations: ReadonlyArray<(database: Database.Database) => void> = [
       );
       CREATE INDEX voice_templates_updated ON voice_templates(updated_at DESC);
     `);
+  },
+  database => {
+    database.exec(`
+      CREATE TABLE application_settings (
+        key TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
   }
 ];
 

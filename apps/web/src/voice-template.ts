@@ -1,16 +1,19 @@
 import type {
+  DefaultModelSelection,
   VoiceTemplate,
   VoiceTemplateInput
 } from "@writers-room/contracts";
 import { defaultRoomToolNames } from "@writers-room/contracts";
 
-export function blankVoiceTemplate(): VoiceTemplateInput {
+export function blankVoiceTemplate(
+  defaultModel?: DefaultModelSelection
+): VoiceTemplateInput {
   return {
     title: "New voice",
     name: "",
     description: "",
-    provider: "openrouter",
-    modelId: "",
+    provider: defaultModel?.provider ?? "openrouter",
+    modelId: defaultModel?.modelId ?? "",
     systemPrompt: "Advance the discussion from your distinct expertise.",
     personaPrompt: "",
     temperature: 0.7,

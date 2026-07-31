@@ -173,6 +173,13 @@ describe("App effect lifecycle", () => {
             }
           ]
         };
+      } else if (path.endsWith("/api/v1/settings/default-model")) {
+        payload = {
+          defaultModel: {
+            provider: "openrouter",
+            modelId: "anthropic/claude-sonnet"
+          }
+        };
       } else {
         payload = path.endsWith("/api/v1/rooms")
           ? { rooms: [room] }
@@ -206,16 +213,15 @@ describe("App effect lifecycle", () => {
       await new Promise(resolve => setTimeout(resolve, 0));
     });
 
-    const model = document.querySelector<HTMLSelectElement>(
-      'select[name="modelId"]'
+    const model = document.querySelector<HTMLInputElement>(
+      'input[name="modelId"]'
     );
-    expect(Array.from(model?.options ?? []).some(option =>
-      option.textContent?.includes("Claude Sonnet")
-    )).toBe(true);
-    await act(async () => {
-      model!.value = "anthropic/claude-sonnet";
-      model!.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    expect(model?.value).toBe("anthropic/claude-sonnet");
+    const modelList = document.getElementById(model?.getAttribute("list") ?? "");
+    expect(modelList?.querySelector('option[value="anthropic/claude-sonnet"]')
+      ?.getAttribute("label")).toBe("Claude Sonnet");
+    expect(document.querySelector('[aria-label="Filter models"]')).toBeNull();
+    expect(document.querySelector('select[name="modelId"]')).toBeNull();
     expect(document.body.textContent).toContain("PDF");
     expect(document.body.textContent).toContain("structured output");
     expect(document.body.textContent).toContain("prompt caching");
@@ -236,7 +242,7 @@ describe("App effect lifecycle", () => {
         ?.value
     ).toBe("Challenge architecture.");
     expect(
-      document.querySelector<HTMLSelectElement>('select[name="modelId"]')?.value
+      document.querySelector<HTMLInputElement>('input[name="modelId"]')?.value
     ).toBe("legacy/custom-model");
 
     await act(async () => root.unmount());
@@ -255,8 +261,53 @@ describe("App effect lifecycle", () => {
     ) => {
       const path = String(input);
       let payload: unknown;
-      if (path.endsWith("/api/v1/voice-templates")) {
+      if (
+        path.endsWith("/api/v1/voice-templates/generate") &&
+        init?.method === "POST"
+      ) {
+        payload = {
+          template: {
+            title: "Product Heretic",
+            name: "Mara",
+            description: "Questions comfortable assumptions.",
+            provider: "openrouter",
+            modelId: "anthropic/claude-sonnet",
+            systemPrompt: "Challenge the proposal and expose neglected alternatives.",
+            personaPrompt: "Provocative, concrete, and constructive.",
+            temperature: 0.8,
+            maxOutputTokens: 1_200,
+            reasoning: {
+              enabled: true,
+              effort: "medium",
+              displayMode: "summary"
+            },
+            tools: ["search_workspace"],
+            contextBudget: {
+              softLimitTokens: 120_000,
+              hardLimitTokens: 160_000,
+              recentTranscriptTokens: 70_000,
+              retrievedContextTokens: 24_000,
+              notebookTokens: 0
+            }
+          }
+        };
+      } else if (path.endsWith("/api/v1/voice-templates")) {
         payload = { templates: [] };
+      } else if (path.endsWith("/api/v1/health")) {
+        payload = {
+          ok: true,
+          database: true,
+          providers: ["openrouter"]
+        };
+      } else if (path.endsWith("/api/v1/settings/default-model")) {
+        payload = init?.method === "PUT"
+          ? {
+              defaultModel: JSON.parse(String(init.body)) as {
+                provider: string;
+                modelId: string;
+              }
+            }
+          : { defaultModel: null };
       } else if (path.includes("/api/v1/providers/openrouter/models")) {
         payload = {
           provider: "openrouter",
@@ -329,13 +380,92 @@ describe("App effect lifecycle", () => {
     expect(document.body.textContent).toContain("Voice templates");
     expect(document.body.textContent).toContain("Providers & models");
     expect(document.querySelector(".template-form")).not.toBeNull();
-    expect(Array.from(
-      document.querySelector<HTMLSelectElement>('select[name="modelId"]')?.options ?? []
-    ).some(option => option.textContent?.includes("Claude Sonnet"))).toBe(true);
+    const settingsModel = document.querySelector<HTMLInputElement>(
+      'input[name="modelId"]'
+    );
+    expect(document.getElementById(settingsModel?.getAttribute("list") ?? "")
+      ?.querySelector('option[value="anthropic/claude-sonnet"]')
+      ?.getAttribute("label")).toBe("Claude Sonnet");
     expect(document.body.textContent).toContain("Top P");
     expect(document.body.textContent).toContain("Reasoning token cap");
     expect(document.body.textContent).toContain("Tools");
     expect(document.body.textContent).toContain("Context budget");
+
+    const generateVoice = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      "button"
+    )).find(button => button.textContent?.includes("Generate with AI"));
+    await act(async () => generateVoice!.click());
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true
+      }));
+    });
+    expect(document.querySelector(".voice-generator-modal")).toBeNull();
+    expect(document.querySelector(".settings-page")).not.toBeNull();
+    await act(async () => generateVoice!.click());
+    const generator = document.querySelector<HTMLFormElement>(
+      '.voice-generator-modal[role="dialog"]'
+    );
+    expect(generator).not.toBeNull();
+    const generatedName = generator?.querySelector<HTMLInputElement>(
+      'input[name="generatedVoiceName"]'
+    );
+    const sourceText = generator?.querySelector<HTMLTextAreaElement>(
+      'textarea[name="voiceSourceText"]'
+    );
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value"
+      )?.set?.call(generatedName, "Mara");
+      generatedName!.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value"
+      )?.set?.call(
+        sourceText,
+        "A product strategist who challenges safe assumptions and asks what users truly need."
+      );
+      sourceText!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      generator!.dispatchEvent(new Event("submit", {
+        bubbles: true,
+        cancelable: true
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(document.querySelector(".voice-generator-modal")).toBeNull();
+    expect(document.querySelector<HTMLInputElement>(
+      ".template-form input[placeholder=\"Systems Engineer\"]"
+    )?.value).toBe("Mara");
+    expect(document.querySelector<HTMLTextAreaElement>(
+      ".template-form textarea[rows=\"5\"]"
+    )?.value).toContain("neglected alternatives");
+
+    const providers = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".settings-layout nav button"
+    )).find(button => button.textContent?.includes("Providers & models"));
+    await act(async () => providers!.click());
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(document.body.textContent).toContain("Default fallback model");
+    const setDefault = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".catalog-list button"
+    )).find(button => button.textContent?.includes("Set default"));
+    await act(async () => {
+      setDefault!.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(fetchMock.mock.calls
+      .filter(([, init]) => init?.method === "PUT")
+      .map(([, init]) => String(init?.body)))
+      .toContainEqual(expect.stringContaining(
+        '"modelId":"anthropic/claude-sonnet"'
+      ));
+    expect(document.body.textContent).toContain("Current default");
 
     const conversation = Array.from(document.querySelectorAll<HTMLButtonElement>(
       ".settings-layout nav button"

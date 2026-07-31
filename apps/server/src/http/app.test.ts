@@ -49,6 +49,27 @@ class FixtureProvider implements ModelProvider {
   }
 }
 
+class VoiceGeneratorFixtureProvider extends FixtureProvider {
+  lastRequest?: NormalizedChatRequest;
+
+  override async *streamChat(
+    request: NormalizedChatRequest
+  ): AsyncIterable<NormalizedGenerationEvent> {
+    this.lastRequest = request;
+    yield {
+      type: "text-delta",
+      text: JSON.stringify({
+        title: "Product Heretic",
+        description: "Questions comfortable product assumptions.",
+        systemPrompt: "Challenge the proposal and surface neglected alternatives.",
+        personaPrompt: "Provocative, concrete, and constructively skeptical.",
+        temperature: 0.85
+      })
+    };
+    yield { type: "done", finishReason: "stop" };
+  }
+}
+
 const roots: string[] = [];
 
 afterEach(() => {
@@ -83,6 +104,86 @@ describe("local HTTP room seam", () => {
         }
       ]
     });
+    store.close();
+  });
+
+  it("persists the selected fallback model across restarts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const databasePath = join(root, "room.db");
+    const firstStore = new RoomStore(databasePath);
+    const firstApplication = createHttpApplication({
+      store: firstStore,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+
+    const saved = await request(firstApplication)
+      .put("/api/v1/settings/default-model")
+      .send({
+        provider: "openrouter",
+        modelId: "anthropic/claude-sonnet"
+      })
+      .expect(200);
+    expect(saved.body.defaultModel).toEqual({
+      provider: "openrouter",
+      modelId: "anthropic/claude-sonnet"
+    });
+    firstStore.close();
+
+    const reopenedStore = new RoomStore(databasePath);
+    const reopenedApplication = createHttpApplication({
+      store: reopenedStore,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const loaded = await request(reopenedApplication)
+      .get("/api/v1/settings/default-model")
+      .expect(200);
+    expect(loaded.body.defaultModel).toEqual(saved.body.defaultModel);
+    reopenedStore.close();
+  });
+
+  it("generates an editable voice draft with the fallback model", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const provider = new VoiceGeneratorFixtureProvider();
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", provider]])
+    });
+    await request(application)
+      .put("/api/v1/settings/default-model")
+      .send({
+        provider: "openrouter",
+        modelId: "anthropic/claude-sonnet"
+      })
+      .expect(200);
+
+    const generated = await request(application)
+      .post("/api/v1/voice-templates/generate")
+      .send({
+        name: "Mara",
+        sourceText: "Act as a product strategist who challenges safe assumptions and asks what users truly need."
+      })
+      .expect(200);
+
+    expect(generated.body.template).toMatchObject({
+      title: "Product Heretic",
+      name: "Mara",
+      description: "Questions comfortable product assumptions.",
+      provider: "openrouter",
+      modelId: "anthropic/claude-sonnet",
+      systemPrompt: "Challenge the proposal and surface neglected alternatives.",
+      personaPrompt: "Provocative, concrete, and constructively skeptical.",
+      temperature: 0.85
+    });
+    expect(provider.lastRequest?.modelId).toBe("anthropic/claude-sonnet");
+    expect(provider.lastRequest?.messages.at(-1)?.content)
+      .toContain("what users truly need");
+    const templates = await request(application)
+      .get("/api/v1/voice-templates")
+      .expect(200);
+    expect(templates.body.templates).toEqual([]);
     store.close();
   });
 
