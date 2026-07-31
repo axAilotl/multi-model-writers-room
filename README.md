@@ -38,7 +38,7 @@ cloud deployment.
 ```bash
 npm install
 cp .env.example .env
-# Add OPENROUTER_API_KEY to your shell or load .env with your preferred tool.
+# Add OPENROUTER_API_KEY to .env.
 npm run dev
 ```
 
@@ -49,7 +49,7 @@ For the production-shaped single-server build:
 
 ```bash
 npm run build
-OPENROUTER_API_KEY=... npm start
+npm start
 ```
 
 Then open `http://127.0.0.1:8787`.

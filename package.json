@@ -12,9 +12,9 @@
   },
   "scripts": {
     "build": "npm run build -w @writers-room/contracts && npm run build -w @writers-room/server && npm run build -w @writers-room/web",
-    "dev": "concurrently -k -n server,web -c cyan,magenta \"npm run dev -w @writers-room/server\" \"npm run dev -w @writers-room/web\"",
+    "dev": "node --env-file-if-exists=.env node_modules/concurrently/dist/bin/concurrently.js -k -n server,web -c cyan,magenta \"npm run dev -w @writers-room/server\" \"npm run dev -w @writers-room/web\"",
     "lint": "npm run typecheck",
-    "start": "npm run start -w @writers-room/server",
+    "start": "node --env-file-if-exists=.env apps/server/dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p packages/contracts/tsconfig.json --noEmit && tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
