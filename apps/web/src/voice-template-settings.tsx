@@ -1,5 +1,6 @@
 import {
   Bot,
+  Check,
   LoaderCircle,
   Plus,
   Save,
@@ -27,16 +28,21 @@ export function VoiceTemplateEditor() {
   const [selectedId, setSelectedId] = useState<string>();
   const [draft, setDraft] = useState<VoiceTemplateInput>(blankVoiceTemplate);
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string>();
   const [defaultModel, setDefaultModel] = useState<DefaultModelSelection>();
   const [showGenerator, setShowGenerator] = useState(false);
 
   useEffect(() => {
     let active = true;
-    void Promise.all([api.listVoiceTemplates(), api.getDefaultModel()])
-      .then(([nextTemplates, savedDefault]) => {
+    void (async () => {
+      try {
+        const nextTemplates = await api.listVoiceTemplates();
         if (!active) return;
         setTemplates(nextTemplates);
+        const savedDefault = await api.getDefaultModel();
+        if (!active) return;
         setDefaultModel(savedDefault);
         if (savedDefault) {
           setDraft(current => current.modelId
@@ -47,12 +53,12 @@ export function VoiceTemplateEditor() {
                 modelId: savedDefault.modelId
               });
         }
-      })
-      .catch(errorValue => {
+      } catch (errorValue) {
         if (active) {
           setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
         }
-      });
+      }
+    })();
     return () => {
       active = false;
     };
@@ -62,18 +68,24 @@ export function VoiceTemplateEditor() {
     key: Key,
     value: VoiceTemplateInput[Key]
   ) {
+    setSaved(false);
+    setConfirmingDelete(false);
     setDraft(current => ({ ...current, [key]: value }));
   }
 
   function select(template: VoiceTemplate) {
     setSelectedId(template.id);
     setDraft(voiceTemplateInput(template));
+    setSaved(false);
+    setConfirmingDelete(false);
     setError(undefined);
   }
 
   function createNew() {
     setSelectedId(undefined);
     setDraft(blankVoiceTemplate(defaultModel));
+    setSaved(false);
+    setConfirmingDelete(false);
     setError(undefined);
   }
 
@@ -96,6 +108,8 @@ export function VoiceTemplateEditor() {
       ]);
       setSelectedId(saved.id);
       setDraft(voiceTemplateInput(saved));
+      setSaved(true);
+      setConfirmingDelete(false);
     } catch (errorValue) {
       setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
     } finally {
@@ -104,7 +118,7 @@ export function VoiceTemplateEditor() {
   }
 
   async function remove() {
-    if (!selectedId || !window.confirm("Delete this voice template?")) return;
+    if (!selectedId) return;
     setSaving(true);
     setError(undefined);
     try {
@@ -220,7 +234,7 @@ export function VoiceTemplateEditor() {
                 type="number"
                 min={0}
                 max={2}
-                step={0.1}
+                step="any"
                 value={draft.temperature}
                 onChange={event => update("temperature", Number(event.target.value))}
               />
@@ -230,7 +244,7 @@ export function VoiceTemplateEditor() {
                 type="number"
                 min={0}
                 max={1}
-                step={0.05}
+                step="any"
                 value={draft.topP ?? ""}
                 placeholder="Provider default"
                 onChange={event => update(
@@ -387,11 +401,41 @@ export function VoiceTemplateEditor() {
           </fieldset>
           {error && <div className="settings-error">{error}</div>}
           <footer>
-            {selectedId && (
-              <button type="button" className="danger-button" onClick={() => void remove()}>
+            {selectedId && !confirmingDelete && (
+              <button
+                type="button"
+                className="danger-button"
+                disabled={saving}
+                onClick={() => {
+                  setSaved(false);
+                  setConfirmingDelete(true);
+                }}
+              >
                 <Trash2 size={14} /> Delete
               </button>
             )}
+            {selectedId && confirmingDelete && (
+              <div className="delete-confirmation">
+                <span>Delete this template?</span>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={saving}
+                  onClick={() => setConfirmingDelete(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  disabled={saving}
+                  onClick={() => void remove()}
+                >
+                  <Trash2 size={14} /> Confirm delete
+                </button>
+              </div>
+            )}
+            {saved && <span className="saved-label"><Check size={13} /> Saved</span>}
             <button className="primary-button" disabled={saving || !draft.name.trim()}>
               {saving ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
               {selectedId ? "Save template" : "Create template"}
@@ -406,6 +450,8 @@ export function VoiceTemplateEditor() {
           onGenerated={template => {
             setSelectedId(undefined);
             setDraft(template);
+            setSaved(false);
+            setConfirmingDelete(false);
             setError(undefined);
             setShowGenerator(false);
           }}

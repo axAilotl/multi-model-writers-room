@@ -89,6 +89,7 @@ function bindRoomWebSocket(server: Server, store: RoomStore): () => void {
     socket.once("close", dispose);
   });
   return () => {
+    for (const socket of sockets.clients) socket.terminate();
     for (const dispose of cleanup) dispose();
     sockets.close();
   };

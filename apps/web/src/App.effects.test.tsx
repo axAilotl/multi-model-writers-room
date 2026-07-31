@@ -36,6 +36,14 @@ const snapshot = {
   latestSequence: 0
 };
 
+function requestBody<Result>(init?: RequestInit): Result {
+  try {
+    return JSON.parse(String(init?.body)) as Result;
+  } catch (error) {
+    throw new Error("Test received an invalid JSON request body", { cause: error });
+  }
+}
+
 class FakeWebSocket {
   onmessage?: () => void;
 
@@ -301,7 +309,7 @@ describe("App effect lifecycle", () => {
             modelId: "anthropic/claude-sonnet",
             systemPrompt: "Challenge the proposal and expose neglected alternatives.",
             personaPrompt: "Provocative, concrete, and constructive.",
-            temperature: 0.8,
+            temperature: 0.85,
             maxOutputTokens: 1_200,
             reasoning: {
               enabled: true,
@@ -319,7 +327,18 @@ describe("App effect lifecycle", () => {
           }
         };
       } else if (path.endsWith("/api/v1/voice-templates")) {
-        payload = { templates: [] };
+        if (init?.method === "POST") {
+          payload = {
+            template: {
+              ...requestBody<Record<string, unknown>>(init),
+              id: "saved-template-1",
+              createdAt: "2026-07-31T12:00:00.000Z",
+              updatedAt: "2026-07-31T12:00:00.000Z"
+            }
+          };
+        } else {
+          payload = { templates: [] };
+        }
       } else if (path.endsWith("/api/v1/health")) {
         payload = {
           ok: true,
@@ -329,10 +348,10 @@ describe("App effect lifecycle", () => {
       } else if (path.endsWith("/api/v1/settings/default-model")) {
         payload = init?.method === "PUT"
           ? {
-              defaultModel: JSON.parse(String(init.body)) as {
+              defaultModel: requestBody<{
                 provider: string;
                 modelId: string;
-              }
+              }>(init)
             }
           : {
               defaultModel: {
@@ -395,9 +414,9 @@ describe("App effect lifecycle", () => {
         path.endsWith("/api/v1/rooms/room-1") &&
         init?.method === "PATCH"
       ) {
-        const body = JSON.parse(String(init.body)) as {
+        const body = requestBody<{
           settings: typeof room.settings;
-        };
+        }>(init);
         payload = {
           room: {
             ...room,
@@ -505,6 +524,19 @@ describe("App effect lifecycle", () => {
     expect(document.querySelector<HTMLTextAreaElement>(
       ".template-form textarea[rows=\"5\"]"
     )?.value).toContain("neglected alternatives");
+    const createTemplate = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".template-form button"
+    )).find(button => button.textContent?.includes("Create template"));
+    await act(async () => {
+      createTemplate!.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).endsWith("/api/v1/voice-templates") &&
+      init?.method === "POST"
+    )).toBe(true);
+    expect(document.body.textContent).toContain("Product Heretic");
+    expect(document.body.textContent).toContain("Saved");
 
     const providers = Array.from(document.querySelectorAll<HTMLButtonElement>(
       ".settings-layout nav button"
@@ -538,6 +570,8 @@ describe("App effect lifecycle", () => {
     )).find(button => button.textContent?.includes("Conversation"));
     await act(async () => conversation!.click());
     expect(document.body.textContent).toContain("Fatigue recovery interval");
+    expect(document.querySelector<HTMLFormElement>(".settings-form")?.checkValidity())
+      .toBe(true);
     const recoveryLabel = Array.from(document.querySelectorAll<HTMLLabelElement>(
       ".settings-form label"
     )).find(label => label.textContent?.includes("Fatigue recovery interval"));

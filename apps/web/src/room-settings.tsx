@@ -114,7 +114,7 @@ export function RoomSettingsEditor({
             type="number"
             min={0}
             max={1}
-            step={0.05}
+            step="any"
             value={settings.fatigueThreshold}
             onChange={event => update("fatigueThreshold", Number(event.target.value))}
           />
@@ -125,7 +125,7 @@ export function RoomSettingsEditor({
             type="number"
             min={0}
             max={0.25}
-            step={0.01}
+            step="any"
             value={settings.jitter}
             onChange={event => update("jitter", Number(event.target.value))}
           />
@@ -135,11 +135,11 @@ export function RoomSettingsEditor({
           <input
             type="number"
             min={1}
-            step={1}
+            step="any"
             value={settings.idleRecoveryIntervalMs / 60_000}
             onChange={event => update(
               "idleRecoveryIntervalMs",
-              Math.max(1, Number(event.target.value)) * 60_000
+              Math.round(Math.max(1, Number(event.target.value)) * 60_000)
             )}
           />
         </label>

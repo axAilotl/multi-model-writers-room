@@ -83,12 +83,29 @@ function MessageDetails({ generation }: {
   generation: GenerationRecord;
 }) {
   const [open, setOpen] = useState(false);
+  const [inspectionError, setInspectionError] = useState<string>();
   const [inspection, setInspection] = useState<Awaited<
     ReturnType<typeof api.inspectGeneration>
   >>();
   useEffect(() => {
     if (!open || inspection) return;
-    void api.inspectGeneration(generation.id).then(setInspection);
+    let active = true;
+    setInspectionError(undefined);
+    void (async () => {
+      try {
+        const result = await api.inspectGeneration(generation.id);
+        if (active) setInspection(result);
+      } catch (errorValue) {
+        if (active) {
+          setInspectionError(
+            errorValue instanceof Error ? errorValue.message : String(errorValue)
+          );
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
   }, [open, generation.id, inspection]);
   return (
     <div className="message-details">
@@ -99,6 +116,7 @@ function MessageDetails({ generation }: {
       </button>
       {open && (
         <div className="detail-panel">
+          {inspectionError && <div className="settings-error">{inspectionError}</div>}
           <section>
             <span className="detail-label">Reasoning</span>
             <p>
@@ -122,7 +140,9 @@ function MessageDetails({ generation }: {
             </div>
             <div>
               <span className="detail-label">Cost</span>
-              <strong>{generation.costUsd == null ? "—" : `$${generation.costUsd.toFixed(4)}`}</strong>
+              <strong>{generation.costUsd === undefined || generation.costUsd === null
+                ? "—"
+                : `$${generation.costUsd.toFixed(4)}`}</strong>
             </div>
           </section>
           {inspection && inspection.citations.length > 0 && (
@@ -228,18 +248,26 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
 
 function WorkspacePanel({ snapshot, onChanged }: {
   snapshot: RoomSnapshot;
-  onChanged: () => void;
+  onChanged: () => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<WorkspaceSearchResult[]>([]);
   const [uploading, setUploading] = useState(false);
   const [note, setNote] = useState("");
+  const [error, setError] = useState<string>();
+
+  function showError(errorValue: unknown) {
+    setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+  }
 
   async function upload(file: File) {
     setUploading(true);
+    setError(undefined);
     try {
       await api.upload(snapshot.room.id, file);
-      onChanged();
+      await onChanged();
+    } catch (errorValue) {
+      showError(errorValue);
     } finally {
       setUploading(false);
     }
@@ -248,15 +276,25 @@ function WorkspacePanel({ snapshot, onChanged }: {
   async function search(event: FormEvent) {
     event.preventDefault();
     if (!query.trim()) return;
-    setResults(await api.search(snapshot.room.id, query.trim()));
+    setError(undefined);
+    try {
+      setResults(await api.search(snapshot.room.id, query.trim()));
+    } catch (errorValue) {
+      showError(errorValue);
+    }
   }
 
   async function addNote(event: FormEvent) {
     event.preventDefault();
     if (!note.trim()) return;
-    await api.addNote(snapshot.room.id, note.trim(), "working");
-    setNote("");
-    onChanged();
+    setError(undefined);
+    try {
+      await api.addNote(snapshot.room.id, note.trim(), "working");
+      setNote("");
+      await onChanged();
+    } catch (errorValue) {
+      showError(errorValue);
+    }
   }
 
   return (
@@ -284,6 +322,7 @@ function WorkspacePanel({ snapshot, onChanged }: {
           onChange={event => setQuery(event.target.value)}
         />
       </form>
+      {error && <div className="settings-error">{error}</div>}
       {results.length > 0 && (
         <div className="search-results">
           <div className="section-label">Search results</div>
@@ -355,13 +394,13 @@ function AddAgent({ roomId, onAdded, onClose }: {
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([
-      api.listVoiceTemplates(),
-      api.getDefaultModel()
-    ])
-      .then(([nextTemplates, defaultModel]) => {
+    void (async () => {
+      try {
+        const nextTemplates = await api.listVoiceTemplates();
         if (cancelled) return;
         setTemplates(nextTemplates);
+        const defaultModel = await api.getDefaultModel();
+        if (cancelled) return;
         if (defaultModel) {
           setDraft(current => current.modelId
             ? current
@@ -371,12 +410,12 @@ function AddAgent({ roomId, onAdded, onClose }: {
                 modelId: defaultModel.modelId
               });
         }
-      })
-      .catch(errorValue => {
+      } catch (errorValue) {
         if (!cancelled) {
           setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
         }
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -519,9 +558,9 @@ function AddAgent({ roomId, onAdded, onClose }: {
   );
 }
 
-function ParticipantsPanel({ snapshot, onChanged, onAdd }: {
+function ParticipantsPanel({ snapshot, onAction, onAdd }: {
   snapshot: RoomSnapshot;
-  onChanged: () => void;
+  onAction: (action: () => Promise<unknown>) => void;
   onAdd: () => void;
 }) {
   return (
@@ -572,13 +611,17 @@ function ParticipantsPanel({ snapshot, onChanged, onAdd }: {
               <div className="participant-actions">
                 <button
                   title={runtime?.muted ? "Unmute" : "Mute"}
-                  onClick={() => void api.mute(snapshot.room.id, agent.id, !(runtime?.muted ?? false)).then(onChanged)}
+                  onClick={() => onAction(() =>
+                    api.mute(snapshot.room.id, agent.id, !(runtime?.muted ?? false))
+                  )}
                 >
                   {runtime?.muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
                 </button>
                 <button
                   disabled={generating || runtime?.muted}
-                  onClick={() => void api.selectSpeaker(snapshot.room.id, agent.id).then(onChanged)}
+                  onClick={() => onAction(() =>
+                    api.selectSpeaker(snapshot.room.id, agent.id)
+                  )}
                 >
                   <Mic2 size={13} /> Invite
                 </button>
@@ -596,7 +639,7 @@ function ParticipantsPanel({ snapshot, onChanged, onAdd }: {
   );
 }
 
-function EmptyRoom({ onCreate }: { onCreate: (title: string) => Promise<void> }) {
+function EmptyRoom({ onCreate }: { onCreate: (title: string) => void }) {
   const [title, setTitle] = useState("New writers' room");
   return (
     <main className="welcome">
@@ -606,7 +649,7 @@ function EmptyRoom({ onCreate }: { onCreate: (title: string) => Promise<void> })
       <p>Put an idea on the table and let independently configured models challenge, extend, and connect it.</p>
       <form onSubmit={event => {
         event.preventDefault();
-        void onCreate(title);
+        onCreate(title);
       }}>
         <input value={title} onChange={event => setTitle(event.target.value)} />
         <button className="primary-button"><Plus size={16} /> Create room</button>
@@ -624,15 +667,26 @@ export default function App() {
   const [error, setError] = useState<string>();
   const [showAgent, setShowAgent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const latestSequenceRef = useRef(0);
+  const refreshRequestRef = useRef(0);
+  latestSequenceRef.current = snapshot && snapshot.room.id === roomId
+    ? snapshot.latestSequence
+    : 0;
 
   const refresh = useCallback(async (selectedRoomId?: string) => {
+    const requestId = ++refreshRequestRef.current;
     const id = selectedRoomId ?? roomId;
     const nextRooms = await api.listRooms();
-    setRooms(nextRooms);
     const resolved = id ?? nextRooms[0]?.id;
-    if (resolved) {
+    const nextSnapshot = resolved ? await api.snapshot(resolved) : undefined;
+    if (requestId !== refreshRequestRef.current) return;
+    setRooms(nextRooms);
+    if (resolved && nextSnapshot) {
       setRoomId(resolved);
-      setSnapshot(await api.snapshot(resolved));
+      setSnapshot(nextSnapshot);
+    } else {
+      setRoomId(undefined);
+      setSnapshot(undefined);
     }
   }, [roomId]);
 
@@ -643,20 +697,33 @@ export default function App() {
   useEffect(() => {
     if (!roomId) return;
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const after = snapshot?.latestSequence ?? 0;
-    const socket = new WebSocket(
-      `${protocol}//${location.host}/api/v1/rooms/${roomId}/stream?after=${after}`
-    );
-    let timer: number | undefined;
-    socket.onmessage = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        void refresh(roomId).catch(errorValue => setError(String(errorValue)));
-      }, 80);
-    };
+    let disposed = false;
+    let refreshTimer: number | undefined;
+    let reconnectTimer: number | undefined;
+    let socket: WebSocket | undefined;
+
+    function connect() {
+      if (disposed) return;
+      socket = new WebSocket(
+        `${protocol}//${location.host}/api/v1/rooms/${roomId}/stream?after=${latestSequenceRef.current}`
+      );
+      socket.onmessage = () => {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(() => {
+          void refresh(roomId).catch(errorValue => setError(String(errorValue)));
+        }, 80);
+      };
+      socket.onclose = () => {
+        if (!disposed) reconnectTimer = window.setTimeout(connect, 1_000);
+      };
+    }
+
+    connect();
     return () => {
-      window.clearTimeout(timer);
-      socket.close();
+      disposed = true;
+      window.clearTimeout(refreshTimer);
+      window.clearTimeout(reconnectTimer);
+      socket?.close();
     };
   }, [roomId]);
 
@@ -680,12 +747,21 @@ export default function App() {
     }
   }
 
+  async function createFirstRoom(title: string) {
+    setError(undefined);
+    try {
+      const room = await api.createRoom(title);
+      await refresh(room.id);
+    } catch (errorValue) {
+      setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+    }
+  }
+
   if (!snapshot) {
     return (
       <>
-        <EmptyRoom onCreate={async title => {
-          const room = await api.createRoom(title);
-          await refresh(room.id);
+        <EmptyRoom onCreate={title => {
+          void createFirstRoom(title);
         }} />
         {error && <div className="toast error-toast">{error}</div>}
       </>
@@ -697,7 +773,11 @@ export default function App() {
       <header className="topbar">
         <div className="brand"><MessageSquareText size={18} /><span>Writers’ Room</span></div>
         <div className="room-switcher">
-          <select value={roomId} onChange={event => void refresh(event.target.value)}>
+          <select
+            value={roomId}
+            onChange={event => void refresh(event.target.value)
+              .catch(errorValue => setError(String(errorValue)))}
+          >
             {rooms.map(room => <option key={room.id} value={room.id}>{room.title}</option>)}
           </select>
           <span className={`room-status ${snapshot.room.status}`} />
@@ -747,7 +827,7 @@ export default function App() {
       </header>
 
       <div className="room-grid">
-        <WorkspacePanel snapshot={snapshot} onChanged={() => void refresh(roomId)} />
+        <WorkspacePanel snapshot={snapshot} onChanged={() => refresh(roomId)} />
         <main className="center-panel">
           <div className="conversation-heading">
             <div>
@@ -800,14 +880,15 @@ export default function App() {
         </main>
         <ParticipantsPanel
           snapshot={snapshot}
-          onChanged={() => void refresh(roomId)}
+          onAction={action => void act(action)}
           onAdd={() => setShowAgent(true)}
         />
       </div>
       {showAgent && (
         <AddAgent
           roomId={snapshot.room.id}
-          onAdded={() => void refresh(roomId)}
+          onAdded={() => void refresh(roomId)
+            .catch(errorValue => setError(String(errorValue)))}
           onClose={() => setShowAgent(false)}
         />
       )}

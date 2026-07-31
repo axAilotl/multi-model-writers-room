@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RoomStore } from "./room-store.js";
+import { createDefaultVoiceConfiguration } from "@writers-room/contracts";
 import type { AgentDefinition } from "@writers-room/contracts";
 
 const roots: string[] = [];
@@ -93,6 +94,43 @@ describe("RoomStore public room seam", () => {
       status: "interrupted",
       error: "Generation interrupted by process restart"
     });
+    reopened.close();
+  });
+
+  it("persists fallback selection and voice templates across restart", () => {
+    const first = makeStore();
+    const databasePath = first.databasePath;
+    first.setDefaultModel({
+      provider: "openrouter",
+      modelId: "moonshotai/kimi-k3"
+    });
+    const created = first.createVoiceTemplate({
+      ...createDefaultVoiceConfiguration(),
+      title: "Product Heretic",
+      name: "Mara",
+      description: "Challenges safe assumptions.",
+      provider: "openrouter",
+      modelId: "moonshotai/kimi-k3",
+      systemPrompt: "Expose neglected alternatives.",
+      personaPrompt: "Provocative and constructive.",
+      temperature: 0.85,
+      topP: 0.73
+    });
+    first.close();
+
+    const reopened = new RoomStore(databasePath);
+    expect(reopened.getDefaultModel()).toEqual({
+      provider: "openrouter",
+      modelId: "moonshotai/kimi-k3"
+    });
+    expect(reopened.listVoiceTemplates()).toMatchObject([
+      {
+        id: created.id,
+        name: "Mara",
+        temperature: 0.85,
+        topP: 0.73
+      }
+    ]);
     reopened.close();
   });
 });

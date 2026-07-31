@@ -67,6 +67,14 @@ function cleanBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
 }
 
+function parseStreamDelta(data: string): StreamDelta {
+  try {
+    return JSON.parse(data) as StreamDelta;
+  } catch (error) {
+    throw new Error("Provider returned a malformed streaming event", { cause: error });
+  }
+}
+
 function toolPayload(request: NormalizedChatRequest): unknown[] | undefined {
   if (request.tools.length === 0) return undefined;
   return request.tools.map(tool => ({
@@ -148,7 +156,7 @@ async function* parseServerSentEvents(
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (!data || data === "[DONE]") continue;
-        yield JSON.parse(data) as StreamDelta;
+        yield parseStreamDelta(data);
       }
     }
     if (done) break;
@@ -157,7 +165,7 @@ async function* parseServerSentEvents(
     for (const line of buffer.split(/\r?\n/)) {
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
-      if (data && data !== "[DONE]") yield JSON.parse(data) as StreamDelta;
+      if (data && data !== "[DONE]") yield parseStreamDelta(data);
     }
   }
 }
@@ -234,7 +242,8 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
   async listModels(): Promise<ModelDescriptor[]> {
     const response = await this.fetcher(`${this.baseUrl}/models`, {
-      headers: this.requestHeaders()
+      headers: this.requestHeaders(),
+      signal: AbortSignal.timeout(30_000)
     });
     if (!response.ok) throw await this.providerError(response);
     const payload = await response.json() as {
@@ -261,7 +270,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
   async getCapabilities(modelId: string): Promise<ModelCapabilities | undefined> {
     if (this.overrides[modelId]) return this.overrides[modelId];
-    return (await this.listModels()).find(model => model.id === modelId)?.capabilities;
+    return (await this.listModels()).find(model => Object.is(model.id, modelId))?.capabilities;
   }
 
   async *streamChat(

@@ -13,25 +13,27 @@ export function useProviderModels(provider: AgentDefinition["provider"]) {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setLoading(true);
     setError(undefined);
     setModels([]);
 
-    void api.listProviderModels(provider)
-      .then(nextModels => {
+    void (async () => {
+      try {
+        const nextModels = await api.listProviderModels(provider, controller.signal);
         if (active) setModels(nextModels);
-      })
-      .catch(errorValue => {
+      } catch (errorValue) {
         if (!active) return;
         setModels([]);
         setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
-      })
-      .finally(() => {
+      } finally {
         if (active) setLoading(false);
-      });
+      }
+    })();
 
     return () => {
       active = false;
+      controller.abort();
     };
   }, [provider, revision]);
 

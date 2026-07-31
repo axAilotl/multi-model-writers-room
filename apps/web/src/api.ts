@@ -18,14 +18,32 @@ async function requestJson<Result>(
 ): Promise<Result> {
   const response = await fetch(path, {
     ...init,
+    signal: init?.signal ?? AbortSignal.timeout(30_000),
     headers: {
       ...(init?.body instanceof FormData ? {} : { "content-type": "application/json" }),
       ...init?.headers
     }
   });
-  const payload = await response.json() as Result & { error?: string };
-  if (!response.ok) throw new Error(payload.error ?? `Request failed: ${response.status}`);
-  return payload;
+  const text = await response.text();
+  let payload: unknown;
+  try {
+    payload = text ? JSON.parse(text) : undefined;
+  } catch {
+    throw new Error(
+      response.ok
+        ? "The server returned an invalid response"
+        : `Request failed: ${response.status} ${response.statusText}`.trim()
+    );
+  }
+  if (!response.ok) {
+    const error = payload && typeof payload === "object" &&
+      "error" in payload && typeof payload.error === "string"
+      ? payload.error
+      : `Request failed: ${response.status} ${response.statusText}`.trim();
+    throw new Error(error);
+  }
+  if (payload === undefined) throw new Error("The server returned an empty response");
+  return payload as Result;
 }
 
 export const api = {
@@ -38,11 +56,17 @@ export const api = {
     return requestJson("/api/v1/health");
   },
 
-  async listProviderModels(provider: AgentDefinition["provider"]): Promise<ModelDescriptor[]> {
+  async listProviderModels(
+    provider: AgentDefinition["provider"],
+    signal?: AbortSignal
+  ): Promise<ModelDescriptor[]> {
     return (await requestJson<{
       provider: AgentDefinition["provider"];
       models: ModelDescriptor[];
-    }>(`/api/v1/providers/${encodeURIComponent(provider)}/models`)).models;
+    }>(
+      `/api/v1/providers/${encodeURIComponent(provider)}/models`,
+      signal === undefined ? undefined : { signal }
+    )).models;
   },
 
   async getDefaultModel(): Promise<DefaultModelSelection | undefined> {
