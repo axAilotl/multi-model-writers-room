@@ -79,6 +79,29 @@ export const voiceTemplateInputSchema = agentDefinitionSchema
   });
 export type VoiceTemplateInput = z.infer<typeof voiceTemplateInputSchema>;
 
+// Keep PATCH parsing separate from `voiceTemplateInputSchema.partial()`.
+// Zod retains field defaults through `partial()`, which would turn omitted
+// properties into destructive resets during a partial update.
+export const voiceTemplatePatchSchema = z.object({
+  title: z.string().trim().min(1).max(120).optional(),
+  name: z.string().trim().min(1).max(80).optional(),
+  description: z.string().trim().max(500).optional(),
+  provider: providerKindSchema.optional(),
+  modelId: z.string().trim().min(1).optional(),
+  systemPrompt: z.string().trim().min(1).optional(),
+  personaPrompt: z.string().trim().max(2_000).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  topP: z.number().min(0).max(1).optional(),
+  maxOutputTokens: z.number().int().min(64).max(32_768).optional(),
+  reasoning: reasoningConfigSchema.optional(),
+  tools: z.array(z.string()).optional(),
+  contextBudget: contextBudgetSchema.optional()
+}).refine(
+  value => Object.keys(value).length > 0,
+  "At least one field is required"
+);
+export type VoiceTemplatePatch = z.infer<typeof voiceTemplatePatchSchema>;
+
 export const voiceTemplateSchema = voiceTemplateInputSchema.extend({
   id: z.string().min(1),
   createdAt: z.string().datetime(),

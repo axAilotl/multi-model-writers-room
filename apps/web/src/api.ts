@@ -6,6 +6,7 @@ import type {
   RoomSnapshot,
   VoiceTemplate,
   VoiceTemplateInput,
+  VoiceTemplatePatch,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
 
@@ -57,7 +58,7 @@ export const api = {
 
   async updateVoiceTemplate(
     templateId: string,
-    patch: Partial<VoiceTemplateInput>
+    patch: VoiceTemplatePatch
   ): Promise<VoiceTemplate> {
     return (await requestJson<{ template: VoiceTemplate }>(
       `/api/v1/voice-templates/${encodeURIComponent(templateId)}`,

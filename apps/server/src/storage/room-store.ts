@@ -25,6 +25,7 @@ import {
   type SharedNote,
   type VoiceTemplate,
   type VoiceTemplateInput,
+  type VoiceTemplatePatch,
   type WorkspaceArtifact
 } from "@writers-room/contracts";
 import { uuidv7 } from "../shared/id.js";
@@ -60,10 +61,6 @@ interface JsonRow {
 
 type RoomSettingsPatch = {
   [Key in keyof RoomSettings]?: RoomSettings[Key] | undefined;
-};
-
-type VoiceTemplatePatch = {
-  [Key in keyof VoiceTemplateInput]?: VoiceTemplateInput[Key] | undefined;
 };
 
 export class RoomStore {

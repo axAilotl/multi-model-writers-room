@@ -149,14 +149,14 @@ describe("local HTTP room seam", () => {
       .send({
         title: "Draft critic",
         name: "Critic",
-        description: "",
+        description: "Preserve this description.",
         provider: "openrouter",
         modelId: "anthropic/claude-sonnet",
         systemPrompt: "Challenge the draft.",
         temperature: 0.6,
         maxOutputTokens: 700,
         reasoning: { enabled: false, displayMode: "hidden" },
-        tools: [],
+        tools: ["search_workspace"],
         contextBudget: {
           softLimitTokens: 12_000,
           hardLimitTokens: 16_000,
@@ -170,12 +170,15 @@ describe("local HTTP room seam", () => {
 
     const updated = await request(application)
       .patch(`/api/v1/voice-templates/${templateId}`)
-      .send({ title: "Adversarial critic", temperature: 0.3 })
+      .send({ title: "Adversarial critic" })
       .expect(200);
     expect(updated.body.template).toMatchObject({
       id: templateId,
       title: "Adversarial critic",
-      temperature: 0.3,
+      description: "Preserve this description.",
+      temperature: 0.6,
+      maxOutputTokens: 700,
+      tools: ["search_workspace"],
       systemPrompt: "Challenge the draft."
     });
 

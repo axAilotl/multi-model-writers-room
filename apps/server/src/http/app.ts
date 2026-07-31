@@ -5,7 +5,8 @@ import { z } from "zod";
 import {
   agentDefinitionSchema,
   roomSettingsSchema,
-  voiceTemplateInputSchema
+  voiceTemplateInputSchema,
+  voiceTemplatePatchSchema
 } from "@writers-room/contracts";
 import type { ModelProvider } from "../providers/model-provider.js";
 import { RoomEngine } from "../room/room-engine.js";
@@ -37,10 +38,6 @@ const createMessageSchema = z.object({
 const speakerSchema = z.object({
   targetMessageId: z.string().optional()
 });
-
-const voiceTemplatePatchSchema = voiceTemplateInputSchema
-  .partial()
-  .refine(value => Object.keys(value).length > 0, "At least one field is required");
 
 function asyncRoute(
   handler: (request: express.Request, response: express.Response) => Promise<void>

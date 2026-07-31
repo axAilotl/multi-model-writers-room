@@ -120,6 +120,27 @@ describe("App effect lifecycle", () => {
             }
           ]
         };
+      } else if (path.includes("/api/v1/providers/ollama/models")) {
+        payload = {
+          provider: "ollama",
+          models: [
+            {
+              id: "llama3.3",
+              name: "Llama 3.3",
+              capabilities: {
+                contextLength: 128_000,
+                textInput: true,
+                imageInput: false,
+                pdfInput: false,
+                toolCalling: true,
+                structuredOutput: false,
+                reasoningInputControl: false,
+                reasoningOutput: false,
+                promptCaching: false
+              }
+            }
+          ]
+        };
       } else if (path.endsWith("/api/v1/voice-templates")) {
         payload = {
           templates: [
@@ -128,8 +149,8 @@ describe("App effect lifecycle", () => {
               title: "Systems critic",
               name: "Systems Engineer",
               description: "Finds durable seams.",
-              provider: "openrouter",
-              modelId: "anthropic/claude-sonnet",
+              provider: "ollama",
+              modelId: "legacy/custom-model",
               systemPrompt: "Challenge architecture.",
               personaPrompt: "Direct and skeptical.",
               temperature: 0.4,
@@ -188,7 +209,16 @@ describe("App effect lifecycle", () => {
     const model = document.querySelector<HTMLSelectElement>(
       'select[name="modelId"]'
     );
-    expect(model?.options[0]?.textContent).toContain("Claude Sonnet");
+    expect(Array.from(model?.options ?? []).some(option =>
+      option.textContent?.includes("Claude Sonnet")
+    )).toBe(true);
+    await act(async () => {
+      model!.value = "anthropic/claude-sonnet";
+      model!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain("PDF");
+    expect(document.body.textContent).toContain("structured output");
+    expect(document.body.textContent).toContain("prompt caching");
 
     const template = document.querySelector<HTMLSelectElement>(
       'select[name="voiceTemplate"]'
@@ -205,6 +235,9 @@ describe("App effect lifecycle", () => {
       document.querySelector<HTMLTextAreaElement>('textarea[name="systemPrompt"]')
         ?.value
     ).toBe("Challenge architecture.");
+    expect(
+      document.querySelector<HTMLSelectElement>('select[name="modelId"]')?.value
+    ).toBe("legacy/custom-model");
 
     await act(async () => root.unmount());
   });
@@ -216,7 +249,10 @@ describe("App effect lifecycle", () => {
       configurable: true,
       value: () => {}
     });
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
       const path = String(input);
       let payload: unknown;
       if (path.endsWith("/api/v1/voice-templates")) {
@@ -242,6 +278,19 @@ describe("App effect lifecycle", () => {
             }
           ]
         };
+      } else if (
+        path.endsWith("/api/v1/rooms/room-1") &&
+        init?.method === "PATCH"
+      ) {
+        const body = JSON.parse(String(init.body)) as {
+          settings: typeof room.settings;
+        };
+        payload = {
+          room: {
+            ...room,
+            settings: { ...room.settings, ...body.settings }
+          }
+        };
       } else {
         payload = path.endsWith("/api/v1/rooms")
           ? { rooms: [room] }
@@ -250,7 +299,8 @@ describe("App effect lifecycle", () => {
       return new Response(JSON.stringify(payload), {
         headers: { "content-type": "application/json" }
       });
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     const container = document.createElement("div");
     document.body.append(container);
@@ -275,14 +325,52 @@ describe("App effect lifecycle", () => {
       await new Promise(resolve => setTimeout(resolve, 0));
     });
 
-    expect(document.querySelector(".settings-page")).not.toBeNull();
+    expect(document.querySelector('[role="dialog"][aria-modal="true"]')).not.toBeNull();
     expect(document.body.textContent).toContain("Voice templates");
     expect(document.body.textContent).toContain("Providers & models");
     expect(document.querySelector(".template-form")).not.toBeNull();
-    expect(
-      document.querySelector<HTMLSelectElement>('select[name="modelId"]')
-        ?.options[0]?.textContent
-    ).toContain("Claude Sonnet");
+    expect(Array.from(
+      document.querySelector<HTMLSelectElement>('select[name="modelId"]')?.options ?? []
+    ).some(option => option.textContent?.includes("Claude Sonnet"))).toBe(true);
+    expect(document.body.textContent).toContain("Top P");
+    expect(document.body.textContent).toContain("Reasoning token cap");
+    expect(document.body.textContent).toContain("Tools");
+    expect(document.body.textContent).toContain("Context budget");
+
+    const conversation = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".settings-layout nav button"
+    )).find(button => button.textContent?.includes("Conversation"));
+    await act(async () => conversation!.click());
+    expect(document.body.textContent).toContain("Fatigue recovery interval");
+    const recoveryLabel = Array.from(document.querySelectorAll<HTMLLabelElement>(
+      ".settings-form label"
+    )).find(label => label.textContent?.includes("Fatigue recovery interval"));
+    const recovery = recoveryLabel?.querySelector<HTMLInputElement>("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value"
+      )?.set?.call(recovery, "5");
+      recovery!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      document.querySelector<HTMLFormElement>(".settings-form")?.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true })
+      );
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(fetchMock.mock.calls
+      .filter(([, init]) => init?.method === "PATCH")
+      .map(([, init]) => String(init?.body)))
+      .toContainEqual(expect.stringContaining('"idleRecoveryIntervalMs":300000'));
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true
+      }));
+    });
+    expect(document.querySelector(".settings-page")).toBeNull();
 
     await act(async () => root.unmount());
   });
