@@ -74,4 +74,69 @@ describe("agent context assembly", () => {
     expect(messages.reduce((total, message) => total + Math.ceil(message.content.length / 4), 0))
       .toBeLessThanOrEqual(agent.contextBudget.hardLimitTokens - agent.maxOutputTokens);
   });
+
+  it("caps a configured budget at the selected model context length", () => {
+    const now = "2026-07-31T14:00:00.000Z";
+    const agent: AgentDefinition = {
+      id: "model-bounded-agent",
+      name: "Model Bounded Agent",
+      description: "Cannot exceed its model context.",
+      provider: "openrouter",
+      modelId: "fixture",
+      systemPrompt: "x".repeat(6_000),
+      temperature: 0.5,
+      maxOutputTokens: 256,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 4_000,
+        hardLimitTokens: 5_000,
+        recentTranscriptTokens: 1_000,
+        retrievedContextTokens: 0,
+        notebookTokens: 0
+      },
+      capabilities: {
+        contextLength: 1_000,
+        textInput: true,
+        imageInput: false,
+        pdfInput: false,
+        toolCalling: false,
+        structuredOutput: false,
+        reasoningInputControl: false,
+        reasoningOutput: false,
+        promptCaching: false
+      }
+    };
+    const snapshot: RoomSnapshot = {
+      room: {
+        id: "room-2",
+        title: "Model bounded room",
+        status: "running",
+        settings: {
+          autoMode: true,
+          maxResponders: 1,
+          maxAutonomousWaves: 1,
+          maxAutonomousReplies: 1,
+          agentContinuation: false,
+          jitter: 0,
+          responseLength: "short",
+          fatigueThreshold: 0.72,
+          idleRecoveryIntervalMs: 600_000
+        },
+        createdAt: now,
+        updatedAt: now
+      },
+      agents: [agent],
+      messages: [],
+      generations: [],
+      runtime: [],
+      artifacts: [],
+      notes: [],
+      activations: [],
+      latestSequence: 0
+    };
+
+    expect(() => assembleAgentMessages({ snapshot, agent }))
+      .toThrow(/effective context limit/i);
+  });
 });

@@ -75,14 +75,17 @@ export const contextBudgetSchema = z.object({
 );
 export type ContextBudget = z.infer<typeof contextBudgetSchema>;
 
+const systemPromptSchema = z.string().trim().min(1);
+const personaPromptSchema = z.string().trim();
+
 export const agentDefinitionSchema = z.object({
   id: z.string().min(1),
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(500).default(""),
   provider: providerKindSchema,
   modelId: z.string().trim().min(1),
-  systemPrompt: z.string().trim().min(1),
-  personaPrompt: z.string().trim().max(2_000).optional(),
+  systemPrompt: systemPromptSchema,
+  personaPrompt: personaPromptSchema.optional(),
   temperature: z.number().min(0).max(2).default(0.7),
   topP: z.number().min(0).max(1).optional(),
   maxOutputTokens: z.number().int().min(64).max(32_768).default(1_200),
@@ -140,8 +143,8 @@ export const voiceTemplatePatchSchema = z.object({
   description: z.string().trim().max(500).optional(),
   provider: providerKindSchema.optional(),
   modelId: z.string().trim().min(1).optional(),
-  systemPrompt: z.string().trim().min(1).optional(),
-  personaPrompt: z.string().trim().max(2_000).optional(),
+  systemPrompt: systemPromptSchema.optional(),
+  personaPrompt: personaPromptSchema.optional(),
   temperature: z.number().min(0).max(2).optional(),
   topP: z.number().min(0).max(1).optional(),
   maxOutputTokens: z.number().int().min(64).max(32_768).optional(),

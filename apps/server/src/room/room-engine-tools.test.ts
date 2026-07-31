@@ -79,7 +79,17 @@ describe("room generation tool seam", () => {
     const provider: ModelProvider = {
       id: "openrouter",
       listModels: async (): Promise<ModelDescriptor[]> => [],
-      getCapabilities: async () => undefined,
+      getCapabilities: async () => ({
+        contextLength: 8_000,
+        textInput: true,
+        imageInput: false,
+        pdfInput: false,
+        toolCalling: true,
+        structuredOutput: true,
+        reasoningInputControl: false,
+        reasoningOutput: false,
+        promptCaching: false
+      }),
       streamChat: async function* (
         request: NormalizedChatRequest
       ): AsyncIterable<NormalizedGenerationEvent> {

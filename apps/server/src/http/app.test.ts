@@ -4,6 +4,7 @@ import { join } from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
+  ModelCapabilities,
   NormalizedChatRequest,
   NormalizedGenerationEvent
 } from "@writers-room/contracts";
@@ -49,8 +50,8 @@ class FixtureProvider implements ModelProvider {
     ];
   }
 
-  async getCapabilities(): Promise<undefined> {
-    return undefined;
+  async getCapabilities(): Promise<ModelCapabilities | undefined> {
+    return (await this.listModels())[0]?.capabilities;
   }
 
   async *streamChat(
@@ -88,6 +89,55 @@ class VoiceGeneratorFixtureProvider extends FixtureProvider {
       })
     };
     yield { type: "done", finishReason: "stop" };
+  }
+}
+
+class LargeContextFixtureProvider extends FixtureProvider {
+  override async getCapabilities(): Promise<ModelCapabilities> {
+    return {
+      contextLength: 1_200_000,
+      textInput: true,
+      imageInput: false,
+      pdfInput: false,
+      toolCalling: true,
+      structuredOutput: true,
+      reasoningInputControl: true,
+      reasoningOutput: true,
+      promptCaching: true
+    };
+  }
+}
+
+class DeferredCapabilitiesProvider extends FixtureProvider {
+  readonly started: Promise<void>;
+  private readonly gate: Promise<void>;
+  private markStarted!: () => void;
+  private releaseGate!: () => void;
+
+  constructor() {
+    super();
+    this.started = new Promise(resolve => {
+      this.markStarted = resolve;
+    });
+    this.gate = new Promise(resolve => {
+      this.releaseGate = resolve;
+    });
+  }
+
+  release(): void {
+    this.releaseGate();
+  }
+
+  override async getCapabilities(): Promise<ModelCapabilities | undefined> {
+    this.markStarted();
+    await this.gate;
+    return super.getCapabilities();
+  }
+}
+
+class UnavailableCapabilitiesProvider extends FixtureProvider {
+  override async getCapabilities(): Promise<undefined> {
+    return undefined;
   }
 }
 
@@ -268,6 +318,89 @@ describe("local HTTP room seam", () => {
     reopenedStore.close();
   });
 
+  it("saves a voice template with a large-context persona", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const provider = new LargeContextFixtureProvider();
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", provider]])
+    });
+    const personaPrompt = "Long-context persona instruction. ".repeat(125_000);
+
+    const created = await request(application)
+      .post("/api/v1/voice-templates")
+      .send({
+        title: "Long-context researcher",
+        name: "Researcher",
+        description: "Works from an extensive operating brief.",
+        provider: "openrouter",
+        modelId: "anthropic/claude-sonnet",
+        systemPrompt: "Follow the full persona brief.",
+        personaPrompt,
+        temperature: 0.4,
+        maxOutputTokens: 900,
+        reasoning: { enabled: true, effort: "high", displayMode: "summary" },
+        tools: ["search_workspace"],
+        contextBudget: {
+          softLimitTokens: 1_000_000,
+          hardLimitTokens: 1_100_000,
+          recentTranscriptTokens: 8_000,
+          retrievedContextTokens: 2_000,
+          notebookTokens: 0
+        }
+      })
+      .expect(201);
+
+    expect(created.body.template.personaPrompt).toBe(personaPrompt.trim());
+    const room = store.createRoom({ title: "Large-context room" });
+    const added = await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send({
+        ...created.body.template,
+        id: "large-context-researcher",
+        capabilities: {
+          ...await provider.getCapabilities(),
+          contextLength: 1
+        }
+      })
+      .expect(201);
+    expect(added.body.agent.capabilities.contextLength).toBe(1_200_000);
+
+    store.addAgent(room.id, {
+      ...added.body.agent,
+      capabilities: {
+        ...added.body.agent.capabilities,
+        contextLength: 1
+      }
+    });
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/speakers/large-context-researcher`)
+      .send({})
+      .expect(201);
+    store.close();
+  });
+
+  it("keeps the ordinary JSON request ceiling at two megabytes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const room = store.createRoom({ title: "Ordinary request room" });
+
+    const response = await request(application)
+      .post(`/api/v1/rooms/${room.id}/messages`)
+      .send({ content: "x".repeat(3_000_000) })
+      .expect(413);
+
+    expect(response.body.error).toMatch(/too large/i);
+    store.close();
+  });
+
   it("updates and deletes voice templates through the settings API", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
     roots.push(root);
@@ -397,6 +530,102 @@ describe("local HTTP room seam", () => {
       .send({})
       .expect(409);
 
+    store.close();
+  });
+
+  it("does not start generation when a room is paused during capability lookup", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const provider = new DeferredCapabilitiesProvider();
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", provider]]),
+      automaticScheduling: false
+    });
+    const room = store.createRoom({ title: "Capability race room" });
+    store.addAgent(room.id, {
+      id: "systems",
+      name: "Systems Engineer",
+      description: "Finds durable seams.",
+      provider: "openrouter",
+      modelId: "fixture/model",
+      systemPrompt: "Challenge the design.",
+      temperature: 0.5,
+      maxOutputTokens: 600,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 12_000,
+        hardLimitTokens: 16_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    });
+
+    const generation = request(application)
+      .post(`/api/v1/rooms/${room.id}/speakers/systems`)
+      .send({})
+      .expect(409)
+      .then(response => response);
+    await provider.started;
+    await request(application)
+      .patch(`/api/v1/rooms/${room.id}`)
+      .send({ status: "paused" })
+      .expect(200);
+    provider.release();
+    await generation;
+
+    expect(store.getSnapshot(room.id).generations).toEqual([]);
+    expect(store.getSnapshot(room.id).messages).toEqual([]);
+    store.close();
+  });
+
+  it("fails closed when authoritative model capabilities are unavailable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", new UnavailableCapabilitiesProvider()]]),
+      automaticScheduling: false
+    });
+    const room = store.createRoom({ title: "Unknown capability room" });
+    const agent = {
+      id: "unknown-model",
+      name: "Unknown Model",
+      description: "Uses a model without authoritative metadata.",
+      provider: "openrouter" as const,
+      modelId: "unknown/model",
+      systemPrompt: "Advance the design.",
+      temperature: 0.5,
+      maxOutputTokens: 600,
+      reasoning: { enabled: false, displayMode: "hidden" as const },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 120_000,
+        hardLimitTokens: 1_100_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    };
+
+    const addResponse = await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send(agent)
+      .expect(400);
+    expect(addResponse.body.error).toMatch(/capabilities are unavailable/i);
+
+    store.addAgent(room.id, agent);
+    const generationResponse = await request(application)
+      .post(`/api/v1/rooms/${room.id}/speakers/${agent.id}`)
+      .send({})
+      .expect(500);
+    expect(generationResponse.body.error).toMatch(/capabilities are unavailable/i);
+    expect(store.getSnapshot(room.id).generations).toEqual([]);
+    expect(store.getSnapshot(room.id).messages).toEqual([]);
     store.close();
   });
 

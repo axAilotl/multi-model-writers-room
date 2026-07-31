@@ -58,14 +58,21 @@ export function assembleAgentMessages(input: {
       .map(agent => `- ${agent.name}: ${agent.description}`)
       .join("\n")
   ].filter(Boolean).join("\n\n");
-  const hardInputLimit =
-    input.agent.contextBudget.hardLimitTokens - input.agent.maxOutputTokens;
-  const softInputLimit =
-    input.agent.contextBudget.softLimitTokens - input.agent.maxOutputTokens;
+  const effectiveHardLimit = Math.min(
+    input.agent.contextBudget.hardLimitTokens,
+    input.agent.capabilities?.contextLength ?? Number.POSITIVE_INFINITY
+  );
+  const effectiveSoftLimit = Math.min(
+    input.agent.contextBudget.softLimitTokens,
+    effectiveHardLimit
+  );
+  const hardInputLimit = effectiveHardLimit - input.agent.maxOutputTokens;
+  const softInputLimit = effectiveSoftLimit - input.agent.maxOutputTokens;
   const mandatoryTokens = estimateTokens(mandatorySystem);
   if (mandatoryTokens + 256 > hardInputLimit) {
     throw new Error(
-      `Agent ${input.agent.id} system/persona exceeds its hard context budget`
+      `Agent ${input.agent.id} system/persona exceeds its effective context limit ` +
+      `of ${effectiveHardLimit} tokens`
     );
   }
   const inputLimit = mandatoryTokens + 256 <= softInputLimit
@@ -155,7 +162,10 @@ export function assembleAgentMessages(input: {
     estimateTokens(output[0]!.content) + estimateTokens(output[1]!.content) >
     hardInputLimit
   ) {
-    throw new Error(`Agent ${input.agent.id} context package exceeds its hard budget`);
+    throw new Error(
+      `Agent ${input.agent.id} context package exceeds its effective context limit ` +
+      `of ${effectiveHardLimit} tokens`
+    );
   }
   return output;
 }

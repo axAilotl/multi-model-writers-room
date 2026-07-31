@@ -358,7 +358,11 @@ export function VoiceTemplateEditor() {
           </fieldset>
           <fieldset className="template-fieldset">
             <legend>Context budget</legend>
-            <p>Set how this voice divides its independent working context.</p>
+            <p>
+              Set how this voice divides its independent working context. System and persona
+              prompts are governed by the hard limit, which can be set to 1,000,000 tokens for
+              models that support it.
+            </p>
             <div className="settings-grid context-fields">
               <label>Soft limit
                 <input

@@ -66,7 +66,18 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
   });
   application.disable("x-powered-by");
   application.use(cors({ origin: /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/ }));
-  application.use(express.json({ limit: "2mb" }));
+  const standardJson = express.json({ limit: "2mb" });
+  const largePromptJson = express.json({ limit: "16mb" });
+  application.use((request, response, next) => {
+    const acceptsLargePrompt =
+      (request.method === "POST" && (
+        request.path === "/api/v1/voice-templates" ||
+        /^\/api\/v1\/rooms\/[^/]+\/agents$/.test(request.path)
+      )) ||
+      (request.method === "PATCH" &&
+        /^\/api\/v1\/voice-templates\/[^/]+$/.test(request.path));
+    (acceptsLargePrompt ? largePromptJson : standardJson)(request, response, next);
+  });
 
   application.get("/api/v1/health", (_request, response) => {
     response.json({
@@ -243,13 +254,37 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     response.json({ room });
   });
 
-  application.post("/api/v1/rooms/:roomId/agents", (request, response) => {
-    const agent = agentDefinitionSchema.parse(request.body);
-    const added = options.store.addAgent(String(request.params.roomId), agent);
-    const room = options.store.getRoom(String(request.params.roomId));
-    options.store.appendRoomEvent(room.id, { type: "room.snapshot", room });
-    response.status(201).json({ agent: added });
-  });
+  application.post(
+    "/api/v1/rooms/:roomId/agents",
+    asyncRoute(async (request, response) => {
+      const submitted = agentDefinitionSchema.parse(request.body);
+      const provider = options.providers.get(submitted.provider);
+      if (!provider) {
+        response.status(400).json({
+          error: `Provider is not configured: ${submitted.provider}`
+        });
+        return;
+      }
+      const capabilities = await provider.getCapabilities(submitted.modelId)
+        .catch(() => undefined);
+      if (capabilities === undefined) {
+        response.status(400).json({
+          error: `Model capabilities are unavailable: ${submitted.modelId}`
+        });
+        return;
+      }
+      const { capabilities: _clientCapabilities, ...definition } = submitted;
+      const agent = agentDefinitionSchema.parse({
+        ...definition,
+        ...(capabilities === undefined ? {} : { capabilities })
+      });
+      const roomId = String(request.params.roomId);
+      const added = options.store.addAgent(roomId, agent);
+      const room = options.store.getRoom(roomId);
+      options.store.appendRoomEvent(room.id, { type: "room.snapshot", room });
+      response.status(201).json({ agent: added });
+    })
+  );
 
   application.delete(
     "/api/v1/rooms/:roomId/agents/:agentId",
@@ -446,9 +481,20 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       return;
     }
     const message = error instanceof Error ? error.message : "Unknown error";
+    const explicitStatus = typeof error === "object" && error !== null &&
+      "status" in error && typeof error.status === "number" &&
+      error.status >= 400 && error.status < 500
+      ? error.status
+      : undefined;
+    if (explicitStatus !== undefined) {
+      response.status(explicitStatus).json({
+        error: explicitStatus === 413 ? "Request payload is too large" : message
+      });
+      return;
+    }
     const status = /not found/i.test(message)
       ? 404
-      : /paused|already|muted|does not belong/i.test(message)
+      : /paused|already|muted|does not belong|configuration changed/i.test(message)
         ? 409
         : 500;
     response.status(status).json({ error: message });

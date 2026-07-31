@@ -48,6 +48,30 @@ export class RoomEngine {
     }
     const provider = this.providers.get(agent.provider);
     if (!provider) throw new Error(`Provider is not configured: ${agent.provider}`);
+    const capabilities = await provider.getCapabilities(agent.modelId)
+      .catch(() => undefined);
+    if (capabilities === undefined) {
+      throw new Error(
+        `Model capabilities are unavailable: ${agent.provider}/${agent.modelId}`
+      );
+    }
+    const currentRoom = this.store.getRoom(input.roomId);
+    if (currentRoom.status !== "running") throw new Error("Room is paused");
+    const currentAgent = this.store.getRoomAgent(input.roomId, input.agentId);
+    if (
+      currentAgent.provider !== agent.provider ||
+      currentAgent.modelId !== agent.modelId
+    ) {
+      throw new Error(`Agent configuration changed while preparing generation: ${agent.id}`);
+    }
+    if (this.store.getRuntime(input.roomId, currentAgent.id).muted) {
+      throw new Error(`Agent is muted: ${currentAgent.id}`);
+    }
+    const { capabilities: _storedCapabilities, ...definition } = currentAgent;
+    const effectiveAgent: AgentDefinition = {
+      ...definition,
+      ...(capabilities === undefined ? {} : { capabilities })
+    };
     if ([...this.active.values()].some(active =>
       active.roomId === input.roomId && active.agentId === input.agentId
     )) {
@@ -58,7 +82,7 @@ export class RoomEngine {
     const message = this.store.appendMessage({
       roomId: input.roomId,
       authorType: "agent",
-      authorId: agent.id,
+      authorId: effectiveAgent.id,
       content: "",
       status: "streaming",
       generationId,
@@ -70,12 +94,12 @@ export class RoomEngine {
       id: generationId,
       roomId: input.roomId,
       messageId: message.id,
-      agent
+      agent: effectiveAgent
     });
     const controller = new AbortController();
     this.active.set(generationId, {
       roomId: input.roomId,
-      agentId: agent.id,
+      agentId: effectiveAgent.id,
       controller
     });
     const startedAtMs = Date.now();
@@ -83,7 +107,7 @@ export class RoomEngine {
     try {
       const request = this.buildRequest(
         this.store.getSnapshot(input.roomId),
-        agent,
+        effectiveAgent,
         controller.signal,
         input.targetMessageId
       );

@@ -166,6 +166,9 @@ try {
   await page.getByLabel("System prompt").fill(
     "Challenge unsupported assumptions and propose concrete validation steps."
   );
+  await page.getByLabel("Persona prompt").fill(
+    "Long-context operating principle. ".repeat(200)
+  );
   await page.getByRole("button", { name: "Create template" }).click();
   await page.getByText("Saved", { exact: true }).waitFor();
 
