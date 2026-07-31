@@ -66,11 +66,17 @@ class FixtureProvider implements ModelProvider {
 
 class VoiceGeneratorFixtureProvider extends FixtureProvider {
   lastRequest?: NormalizedChatRequest;
+  calls = 0;
 
   override async *streamChat(
     request: NormalizedChatRequest
   ): AsyncIterable<NormalizedGenerationEvent> {
     this.lastRequest = request;
+    this.calls += 1;
+    if (this.calls === 1) {
+      yield { type: "done", finishReason: "stop" };
+      return;
+    }
     yield {
       type: "text-delta",
       text: JSON.stringify({
@@ -201,8 +207,10 @@ describe("local HTTP room seam", () => {
     });
     expect(provider.lastRequest?.modelId).toBe("anthropic/claude-sonnet");
     expect(provider.lastRequest?.signal).toBeInstanceOf(AbortSignal);
-    expect(provider.lastRequest?.messages.at(-1)?.content)
-      .toContain("what users truly need");
+    expect(provider.calls).toBe(2);
+    expect(provider.lastRequest?.messages.some(message =>
+      message.content.includes("what users truly need")
+    )).toBe(true);
     const templates = await request(application)
       .get("/api/v1/voice-templates")
       .expect(200);

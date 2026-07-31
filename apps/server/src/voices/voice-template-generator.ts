@@ -49,6 +49,21 @@ function parseJsonObject(text: string): unknown {
   return JSON.parse(text.slice(start, end + 1));
 }
 
+async function completionText(
+  provider: ModelProvider,
+  request: NormalizedChatRequest
+): Promise<string> {
+  let text = "";
+  for await (const event of provider.streamChat(request)) {
+    if (event.type === "text-delta") text += event.text;
+  }
+  return text;
+}
+
+function parseGeneratedFields(text: string): z.infer<typeof generatedFieldsSchema> {
+  return generatedFieldsSchema.parse(parseJsonObject(text));
+}
+
 export async function generateVoiceTemplate(input: {
   request: VoiceTemplateGenerationRequest;
   selection: DefaultModelSelection;
@@ -86,16 +101,53 @@ export async function generateVoiceTemplate(input: {
       ? { structuredOutput: generatedFieldsJsonSchema }
       : {})
   };
-  let text = "";
-  for await (const event of input.provider.streamChat(request)) {
-    if (event.type === "text-delta") text += event.text;
+  const firstText = await completionText(input.provider, request);
+  let generated: z.infer<typeof generatedFieldsSchema>;
+  try {
+    generated = parseGeneratedFields(firstText);
+  } catch {
+    if (input.signal?.aborted) {
+      throw input.signal.reason instanceof Error
+        ? input.signal.reason
+        : new Error("Voice generation was aborted");
+    }
+    const repairRequest: NormalizedChatRequest = {
+      modelId: input.selection.modelId,
+      messages: [
+        ...request.messages,
+        ...(firstText.trim()
+          ? [{ role: "assistant" as const, content: firstText.slice(0, 8_000) }]
+          : []),
+        {
+          role: "user",
+          content: [
+            "The previous response was empty or invalid.",
+            "Try once more. Return raw JSON only—no Markdown fence or commentary.",
+            "Include every required field: title, description, systemPrompt, personaPrompt, temperature."
+          ].join("\n")
+        }
+      ],
+      temperature: 0,
+      maxOutputTokens: 1_500,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      sessionId: "voice-template-generator:repair",
+      ...(input.signal === undefined ? {} : { signal: input.signal })
+    };
+    const repairedText = await completionText(input.provider, repairRequest);
+    try {
+      generated = parseGeneratedFields(repairedText);
+    } catch {
+      throw new Error(
+        "The fallback model did not return a valid voice template after two attempts"
+      );
+    }
   }
-  const generated = generatedFieldsSchema.parse(parseJsonObject(text));
   return voiceTemplateInputSchema.parse({
     ...createDefaultVoiceConfiguration(),
     ...generated,
     name: input.request.name,
     provider: input.selection.provider,
-    modelId: input.selection.modelId,
+    modelId: input.selection.modelId
   });
 }
