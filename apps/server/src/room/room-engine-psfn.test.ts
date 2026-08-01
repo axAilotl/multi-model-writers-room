@@ -122,6 +122,9 @@ describe("PSFN room generation", () => {
         messages: Array<{ content: string }>;
       };
       envelopeCharacters = body.messages[0]!.content.length;
+      expect(body.messages[0]!.content).toContain("message_id:");
+      expect(body.messages[0]!.content).toContain("Large room context");
+      expect(body.messages[0]!.content).toContain("[…clipped…]");
       return sse("Grounded reply");
     }) as typeof fetch;
     const { store, engine, roomId } = setup(fetcher);

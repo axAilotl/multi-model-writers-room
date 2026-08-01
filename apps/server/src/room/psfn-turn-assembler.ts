@@ -91,19 +91,49 @@ export function renderPsfnEnvelope(
   };
   let envelope = renderEnvelope(bounded);
   while (envelope.length > characterLimit) {
-    const removableMessage = bounded.pendingMessages.findIndex(message =>
-      message.id !== bounded.triggerMessageId
+    const overflow = envelope.length - characterLimit;
+    const olderMessage = bounded.pendingMessages
+      .filter(message =>
+        message.id !== bounded.triggerMessageId && message.content.length > 96
+      )
+      .sort((left, right) => right.content.length - left.content.length)[0];
+    const evidence = bounded.evidence
+      .filter(item => item.excerpt.length > 192)
+      .sort((left, right) => right.excerpt.length - left.excerpt.length)[0];
+    const participant = bounded.participants
+      .filter(item => item.description.length > 128)
+      .sort((left, right) => right.description.length - left.description.length)[0];
+    const trigger = bounded.pendingMessages.find(message =>
+      message.id === bounded.triggerMessageId
     );
-    if (removableMessage !== -1) {
-      bounded.pendingMessages.splice(removableMessage, 1);
+    const reduction = Math.max(1_024, overflow);
+
+    if (olderMessage) {
+      olderMessage.content = clip(
+        olderMessage.content,
+        Math.max(96, olderMessage.content.length - reduction)
+      );
+    } else if (evidence) {
+      evidence.excerpt = clip(
+        evidence.excerpt,
+        Math.max(192, evidence.excerpt.length - reduction)
+      );
+    } else if (participant) {
+      participant.description = clip(
+        participant.description,
+        Math.max(128, participant.description.length - reduction)
+      );
     } else if (bounded.evidence.length > 0) {
       bounded.evidence.pop();
-    } else {
-      const trigger = bounded.pendingMessages.find(message =>
-        message.id === bounded.triggerMessageId
+    } else if (trigger && trigger.content.length > 32) {
+      trigger.content = clip(
+        trigger.content,
+        Math.max(32, trigger.content.length - reduction)
       );
-      if (!trigger || trigger.content.length <= 32) return clip(envelope, characterLimit);
-      trigger.content = clip(trigger.content, Math.max(32, trigger.content.length - 1_024));
+    } else {
+      throw new Error(
+        "PSFN event metadata exceeds the configured stateful envelope limit"
+      );
     }
     envelope = renderEnvelope(bounded);
   }

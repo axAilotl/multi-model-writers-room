@@ -143,7 +143,7 @@ describe("PSFN turn assembly", () => {
     );
   });
 
-  it("escapes delimiter injection and keeps the trigger under a tight limit", () => {
+  it("escapes delimiter injection and keeps every pending message under a tight limit", () => {
     const target = message({
       id: "target",
       sequence: 3,
@@ -159,11 +159,15 @@ describe("PSFN turn assembly", () => {
       triggerMessageId: target.id,
       lastDeliveredSequence: 1,
       evidence: [],
+      characterLimit: 1_800,
       signal: new AbortController().signal
     });
-    const envelope = renderPsfnEnvelope(assembled.request, 1_800);
+    const envelope = assembled.request.preRenderedEnvelope!;
+    expect(assembled.highSequence).toBe(3);
     expect(envelope).toContain("TRIGGER_SURVIVES");
-    expect(envelope).not.toContain("DROP_ME");
+    expect(envelope).toContain("message_id: older");
+    expect(envelope).toContain("DROP_ME");
+    expect(envelope).toContain("[…clipped…]");
     expect(envelope).toContain("TRIGGER_SURVIVES &lt;");
     expect(envelope).not.toContain("TRIGGER_SURVIVES </new_public_messages>");
   });
