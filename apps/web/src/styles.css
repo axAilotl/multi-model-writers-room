@@ -249,6 +249,8 @@ button { color: inherit; }
 .mention-menu small { color: #817b70; font-size: 9px; }
 .mention-avatar { width: 25px; height: 25px; flex: 0 0 auto; font-size: 8px; }
 .reset-chat-button { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #d8d2c6; border-radius: 6px; padding: 4px 7px; background: #fff; color: #7e766b; font-size: 9px; cursor: pointer; }
+.export-chat-link { text-decoration: none; white-space: nowrap; }
+.export-chat-link:hover { color: #5f584e; border-color: #bdb5a8; }
 .reset-chat-button:disabled { opacity: .45; cursor: default; }
 .chat-reset-confirmation { display: flex; align-items: center; gap: 5px; padding: 4px; border: 1px solid #dfc9bf; border-radius: 7px; background: #fff8f5; }
 .chat-reset-confirmation > span { color: #855b4b; }

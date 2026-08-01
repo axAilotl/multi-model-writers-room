@@ -18,6 +18,10 @@ import type { ModelProvider } from "../providers/model-provider.js";
 import { PsfnProvider, PsfnProviderError } from "../providers/psfn.js";
 import { ProviderConnectionManager } from "../providers/provider-connections.js";
 import { RoomEngine } from "../room/room-engine.js";
+import {
+  markdownExportFilename,
+  renderRoomMarkdown
+} from "../room/room-markdown-export.js";
 import { ParticipantModelActivationEvaluator } from "../scheduler/activation-evaluator.js";
 import { ConversationScheduler } from "../scheduler/scheduler.js";
 import { RoomStore } from "../storage/room-store.js";
@@ -576,6 +580,15 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
 
   application.get("/api/v1/rooms/:roomId", (request, response) => {
     response.json(options.store.getSnapshot(request.params.roomId!));
+  });
+
+  application.get("/api/v1/rooms/:roomId/export.md", (request, response) => {
+    const snapshot = options.store.getSnapshot(String(request.params.roomId));
+    const filename = markdownExportFilename(snapshot.room.title);
+    response
+      .set("Content-Type", "text/markdown; charset=utf-8")
+      .set("Content-Disposition", `attachment; filename="${filename}"`)
+      .send(renderRoomMarkdown(snapshot));
   });
 
   application.patch("/api/v1/rooms/:roomId", (request, response) => {

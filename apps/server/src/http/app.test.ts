@@ -1574,6 +1574,71 @@ describe("local HTTP room seam", () => {
     store.close();
   });
 
+  it("exports the visible public conversation as a Markdown attachment", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const room = store.createRoom({ title: "Archive Room" });
+    store.addAgent(room.id, {
+      id: "editor",
+      name: "Story Editor",
+      description: "Keeps the draft coherent.",
+      provider: "openrouter",
+      modelId: "anthropic/claude-sonnet",
+      systemPrompt: "Edit carefully.",
+      ...createDefaultVoiceConfiguration()
+    });
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "## Opening idea\n\nKeep **this Markdown** intact."
+    });
+    store.appendMessage({
+      roomId: room.id,
+      authorType: "agent",
+      authorId: "editor",
+      content: "Build the second act around the failed signal.",
+      replyToMessageId: human.id,
+      citedChunkIds: ["roadmap-chunk-3"]
+    });
+    const removed = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Removed draft"
+    });
+    store.updateMessage(removed.id, { lifecycle: "deleted" });
+    store.appendMessage({
+      roomId: room.id,
+      authorType: "system",
+      authorId: "system",
+      content: "Internal scheduler event"
+    });
+
+    const response = await request(application)
+      .get(`/api/v1/rooms/${room.id}/export.md`)
+      .expect(200)
+      .expect("content-type", /text\/markdown/)
+      .expect("content-disposition", /attachment; filename="archive-room\.md"/);
+
+    expect(response.text).toContain("# Archive Room");
+    expect(response.text).toContain("## Participants");
+    expect(response.text).toContain("Story Editor");
+    expect(response.text).toContain("## Conversation");
+    expect(response.text).toContain("## Opening idea\n\nKeep **this Markdown** intact.");
+    expect(response.text).toContain("Build the second act around the failed signal.");
+    expect(response.text).toContain(`Reply to: ${human.id}`);
+    expect(response.text).toContain("roadmap-chunk-3");
+    expect(response.text).not.toContain("Removed draft");
+    expect(response.text).not.toContain("Internal scheduler event");
+    store.close();
+  });
+
   it("skips credential-like files during repository directory ingestion", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-repo-safety-"));
     roots.push(root);

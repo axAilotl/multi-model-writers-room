@@ -5,7 +5,21 @@ import type {
   StatefulParticipantTurnRequest
 } from "@writers-room/contracts";
 
-const DEFAULT_ENVELOPE_CHARACTER_LIMIT = 64_000;
+const DEFAULT_ENVELOPE_CHARACTER_LIMIT = 32_768;
+const MIN_ENVELOPE_CHARACTER_LIMIT = 8_000;
+const MAX_STATEFUL_ENVELOPE_CHARACTER_LIMIT = DEFAULT_ENVELOPE_CHARACTER_LIMIT;
+
+/**
+ * The remote model window and the stateful API event packet are separate
+ * limits. Keep the room delta within the packet size validated against the
+ * live stateful pipeline, even when PSFN owns a much larger model context.
+ */
+export function psfnEnvelopeCharacterLimit(contextLength = 32_768): number {
+  return Math.min(
+    MAX_STATEFUL_ENVELOPE_CHARACTER_LIMIT,
+    Math.max(MIN_ENVELOPE_CHARACTER_LIMIT, Math.floor(contextLength))
+  );
+}
 
 function escapeEnvelopeText(value: string): string {
   return value

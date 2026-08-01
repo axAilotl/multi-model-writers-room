@@ -17,7 +17,11 @@ import type {
 } from "../tools/room-tools.js";
 import { assembleAgentMessages } from "./context-assembler.js";
 import { ensureConversationCompaction } from "./context-compactor.js";
-import { assemblePsfnTurn, renderPsfnEnvelope } from "./psfn-turn-assembler.js";
+import {
+  assemblePsfnTurn,
+  psfnEnvelopeCharacterLimit,
+  renderPsfnEnvelope
+} from "./psfn-turn-assembler.js";
 
 const MAX_TOOL_ROUNDS = 8;
 const MAX_TOOL_CALLS = 24;
@@ -836,9 +840,8 @@ export class RoomEngine {
             ? 0
             : existing?.lastDeliveredSequence ?? 0,
           evidence: retrievedEvidence?.evidence ?? [],
-          characterLimit: Math.min(
-            1_000_000,
-            Math.max(8_000, Math.floor((input.agent.capabilities?.contextLength ?? 32_768) * 3))
+          characterLimit: psfnEnvelopeCharacterLimit(
+            input.agent.capabilities?.contextLength
           ),
           resynchronization: input.resynchronization === true,
           signal: input.controller.signal

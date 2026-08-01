@@ -143,7 +143,7 @@ running the generic capability inference:
 
 ```ts
 {
-  contextLength: configuredContextLength ?? 32_768,
+  contextLength: configuredContextLength ?? 1_000_000,
   textInput: true,
   imageInput: false,
   pdfInput: false,
@@ -155,9 +155,9 @@ running the generic capability inference:
 }
 ```
 
-`contextLength` is a Writers' Room budgeting estimate, not a claim about the
-remote companion's actual model. The PSFN path should use delta delivery and
-must not depend on this estimate to replay remote history.
+`contextLength` records the known remote model window for local room-pressure
+and inspection displays. The PSFN path uses a separately bounded stateful event
+packet and must not depend on this value to replay remote history.
 
 Declaring OpenAI tool calling as unsupported does not disable PSFN's own
 server-managed faculties. It only prevents Writers' Room from offering its
@@ -346,7 +346,7 @@ PSFN_BASE_URL=https://companion.example.invalid/v1
 PSFN_API_KEY=
 PSFN_SESSION_MODE=fixed
 PSFN_EXPECTED_COMPANION_ID=
-PSFN_CONTEXT_LENGTH=32768
+PSFN_CONTEXT_LENGTH=1000000
 PSFN_ALLOW_INSECURE_HTTP=false
 ```
 

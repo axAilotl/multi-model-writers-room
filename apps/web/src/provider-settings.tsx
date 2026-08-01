@@ -44,7 +44,7 @@ export function ProviderSettings() {
   const [apiKey, setApiKey] = useState("");
   const [sessionMode, setSessionMode] = useState<"fixed" | "header">("header");
   const [expectedCompanionId, setExpectedCompanionId] = useState("");
-  const [contextLength, setContextLength] = useState(32_768);
+  const [contextLength, setContextLength] = useState(1_000_000);
   const [allowInsecureHttp, setAllowInsecureHttp] = useState(false);
   const [defaultModel, setDefaultModel] = useState<DefaultModelSelection>();
   const [savingDefaultId, setSavingDefaultId] = useState<string>();
@@ -90,7 +90,7 @@ export function ProviderSettings() {
     setApiKey("");
     setSessionMode(connection?.sessionMode ?? "header");
     setExpectedCompanionId(connection?.expectedCompanionId ?? "");
-    setContextLength(connection?.contextLength ?? 32_768);
+    setContextLength(connection?.contextLength ?? 1_000_000);
     setAllowInsecureHttp(connection?.baseUrl?.startsWith("http://") ?? false);
     setConnectionSaved(false);
     setSettingsError(undefined);
@@ -312,7 +312,7 @@ export function ProviderSettings() {
                 />
               </label>
               <label>
-                Adapter context limit
+                Remote model context window
                 <input
                   type="number"
                   min={4_096}
@@ -344,7 +344,7 @@ export function ProviderSettings() {
               </span>
               <small>Status: {connection?.connectionState ?? "unconfigured"}. PSFN owns its persona, prompt, memory, and faculties.</small>
               <small>A successful handshake creates one deduplicated PSFN voice template for adding the companion to rooms.</small>
-              <small>{contextLength.toLocaleString()} tokens is a local envelope-budget estimate, not a claim about PSFN’s retained memory.</small>
+              <small>{contextLength.toLocaleString()} tokens records the remote model window. Writers’ Room sends bounded stateful event deltas rather than filling it.</small>
               {sessionMode === "fixed" && (
                 <small className="credential-guidance">
                   Shared remote continuity: local rooms and chat resets do not erase or isolate PSFN history.

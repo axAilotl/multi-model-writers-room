@@ -256,6 +256,42 @@ describe("App effect lifecycle", () => {
     });
   });
 
+  it("offers a room Markdown archive from the conversation header", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => {}
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      const payload = path.endsWith("/api/v1/rooms")
+        ? { rooms: [room] }
+        : snapshot;
+      return new Response(JSON.stringify(payload), {
+        headers: { "content-type": "application/json" }
+      });
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    const exportLink = container.querySelector<HTMLAnchorElement>(
+      'a[aria-label="Export chat as Markdown"]'
+    );
+    expect(exportLink?.textContent).toContain("Export .md");
+    expect(exportLink?.getAttribute("href"))
+      .toBe(`/api/v1/rooms/${room.id}/export.md`);
+    expect(exportLink?.hasAttribute("download")).toBe(true);
+
+    await act(async () => root.unmount());
+  });
+
   it("does not let a queued refresh restore the previous room while switching", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.stubGlobal("WebSocket", FakeWebSocket);

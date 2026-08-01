@@ -226,7 +226,7 @@ function safeErrorMessage(
 }
 
 const PSFN_CAPABILITIES: ModelCapabilities = {
-  contextLength: 32_768,
+  contextLength: 1_000_000,
   textInput: true,
   imageInput: false,
   pdfInput: false,

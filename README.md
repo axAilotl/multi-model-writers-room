@@ -39,7 +39,7 @@ other, remain silent, or take several bounded autonomous turns.
 | Shared table | Drag-and-drop Markdown, text, and PDF artifacts with summaries, structural chunks, hybrid search, and stable citations |
 | Inspectable generations | Streaming output, provider reasoning when available, retrieved sources, tool calls, tokens, latency, and cost |
 | Durable rooms | SQLite-backed rooms, transcripts, agents, settings, runtime state, artifacts, scratchpad notes, and generation events |
-| Human control | Pause, invite a speaker, mute or remove a participant, switch/delete rooms, reset chat while retaining the room, and cap autonomous waves |
+| Human control | Pause, invite a speaker, mute or remove a participant, switch/delete rooms, export the public chat as Markdown, reset chat while retaining the room, and cap autonomous waves |
 
 Four room formats provide meaningful behavior bundles rather than cosmetic
 presets:
@@ -125,7 +125,7 @@ startup and are restored when a saved override is removed.
 | `PSFN_API_KEY` | Optional PSFN bearer credential | unset |
 | `PSFN_SESSION_MODE` | `header` for per-room continuity or `fixed` for one shared remote session | `header` |
 | `PSFN_EXPECTED_COMPANION_ID` | Optional pinned remote identity; first successful test pins it automatically | unset |
-| `PSFN_CONTEXT_LENGTH` | Bounded adapter input context | `32768` |
+| `PSFN_CONTEXT_LENGTH` | Known remote model context window used for local inspection and budgeting | `1000000` |
 | `PSFN_ALLOW_INSECURE_HTTP` | Allow HTTP only for private/loopback endpoints | `false` |
 | `WRITERS_ROOM_DATA_DIR` | SQLite, blobs, model cache, and generated local state | `./data` |
 | `WRITERS_ROOM_HOST` | API bind address | `127.0.0.1` |
@@ -166,6 +166,10 @@ drops after a turn may have been admitted, the delivery is marked ambiguous and
 must be resolved in the participant panel; the app does not silently risk a
 duplicate. See [the adapter specification](docs/psfn-adapter-spec.md) for the
 protocol and failure semantics.
+
+Each room header also provides **Export .md**. The download contains the active
+public transcript with participant identity, timestamps, reply relationships,
+and stable chunk citations while preserving message Markdown verbatim.
 
 ### Model-aware context and rolling history
 

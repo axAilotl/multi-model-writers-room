@@ -106,7 +106,7 @@ describe("PSFN stateful companion provider", () => {
     expect((await provider.listModels())[0]).toMatchObject({
       id: "companion-1",
       name: "Remote Ada",
-      capabilities: { contextLength: 32_768, toolCalling: false }
+      capabilities: { contextLength: 1_000_000, toolCalling: false }
     });
   });
 

@@ -4,6 +4,7 @@ import {
   ChevronDown,
   CirclePause,
   CirclePlay,
+  Download,
   FileText,
   FolderGit2,
   Gauge,
@@ -1828,6 +1829,13 @@ export default function App() {
             <div className="run-limits">
               <span>{snapshot.room.settings.maxResponders} responders</span>
               <span>{snapshot.room.settings.maxAutonomousWaves} wave cap</span>
+              <a
+                className="reset-chat-button export-chat-link"
+                href={`/api/v1/rooms/${encodeURIComponent(snapshot.room.id)}/export.md`}
+                download
+                aria-label="Export chat as Markdown"
+                title="Download the visible public transcript as Markdown"
+              ><Download size={12} /> Export .md</a>
               {confirmingChatReset ? (
                 <div className="chat-reset-confirmation" role="group" aria-label="Reset chat?">
                   <span>

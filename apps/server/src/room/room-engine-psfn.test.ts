@@ -105,6 +105,47 @@ describe("PSFN room generation", () => {
     store.close();
   });
 
+  it("bounds the stateful event envelope independently of the remote model window", async () => {
+    let envelopeCharacters = 0;
+    const fetcher = (async (url, init) => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname.endsWith("/identity")) {
+        return Response.json({
+          object: "psfn.identity",
+          companion: { id: "companion-1", name: "Companion" }
+        });
+      }
+      if (pathname.endsWith("/models")) {
+        return Response.json({ data: [{ id: "companion-1" }] });
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        messages: Array<{ content: string }>;
+      };
+      envelopeCharacters = body.messages[0]!.content.length;
+      return sse("Grounded reply");
+    }) as typeof fetch;
+    const { store, engine, roomId } = setup(fetcher);
+    const human = store.appendMessage({
+      roomId,
+      authorType: "human",
+      authorId: "human",
+      content: `Large room context ${"x".repeat(80_000)}`
+    });
+
+    await engine.generate({
+      roomId,
+      agentId: "remote",
+      targetMessageId: human.id
+    });
+
+    // PSFN can own a very large model window while its stateful ingress still
+    // needs a smaller bounded event packet. Live validation proved this bound
+    // succeeds where an 88k bootstrap failed before model completion.
+    expect(envelopeCharacters).toBeLessThanOrEqual(32_768);
+    expect(envelopeCharacters).toBeGreaterThan(24_000);
+    store.close();
+  });
+
   it("uses the durable delivery identity to pin an environment-only provider after restart", async () => {
     const firstFetcher = (async url => {
       const pathname = new URL(String(url)).pathname;
