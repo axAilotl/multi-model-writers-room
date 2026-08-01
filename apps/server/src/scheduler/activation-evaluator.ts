@@ -55,29 +55,33 @@ export class ParticipantModelActivationEvaluator {
       reasoning: { enabled: false, displayMode: "hidden" },
       tools: [],
       sessionId: `${input.room.room.id}:${input.agent.id}:activation`,
-      structuredOutput: {
-        name: "activation_decision",
-        strict: true,
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          required: ["shouldRespond", "urgency", "confidence"],
-          properties: {
-            shouldRespond: { type: "boolean" },
-            urgency: { type: "number", minimum: 0, maximum: 1 },
-            confidence: { type: "number", minimum: 0, maximum: 1 },
-            targetMessageId: { type: "string" },
-            intendedMove: {
-              type: "string",
-              enum: [
-                "answer", "challenge", "extend", "clarify", "connect",
-                "summarize", "retrieve", "defer"
-              ]
-            },
-            reason: { type: "string" }
+      ...(input.agent.capabilities?.structuredOutput
+        ? {
+          structuredOutput: {
+            name: "activation_decision",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["shouldRespond", "urgency", "confidence"],
+              properties: {
+                shouldRespond: { type: "boolean" },
+                urgency: { type: "number", minimum: 0, maximum: 1 },
+                confidence: { type: "number", minimum: 0, maximum: 1 },
+                targetMessageId: { type: "string" },
+                intendedMove: {
+                  type: "string",
+                  enum: [
+                    "answer", "challenge", "extend", "clarify", "connect",
+                    "summarize", "retrieve", "defer"
+                  ]
+                },
+                reason: { type: "string" }
+              }
+            }
           }
         }
-      }
+        : {})
     };
     let text = "";
     for await (const event of provider.streamChat(request)) {
@@ -86,4 +90,3 @@ export class ParticipantModelActivationEvaluator {
     return activationDecisionSchema.parse(extractJson(text));
   }
 }
-

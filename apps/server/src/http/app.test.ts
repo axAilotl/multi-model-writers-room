@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ModelCapabilities,
   NormalizedChatRequest,
@@ -89,6 +89,58 @@ class VoiceGeneratorFixtureProvider extends FixtureProvider {
         temperature: 0.85
       })
     };
+    yield { type: "done", finishReason: "stop" };
+  }
+}
+
+class UnstructuredAutoReplyProvider implements ModelProvider {
+  readonly id = "openrouter";
+  activationRequest?: NormalizedChatRequest;
+
+  async listModels(): Promise<ModelDescriptor[]> {
+    return [{
+      id: "fixture/unstructured",
+      name: "Unstructured fixture",
+      capabilities: {
+        contextLength: 32_000,
+        textInput: true,
+        imageInput: false,
+        pdfInput: false,
+        toolCalling: false,
+        structuredOutput: false,
+        reasoningInputControl: false,
+        reasoningOutput: false,
+        promptCaching: false
+      }
+    }];
+  }
+
+  async getCapabilities(): Promise<ModelCapabilities> {
+    return (await this.listModels())[0]!.capabilities;
+  }
+
+  async *streamChat(
+    request: NormalizedChatRequest
+  ): AsyncIterable<NormalizedGenerationEvent> {
+    if (request.sessionId.endsWith(":activation")) {
+      this.activationRequest = request;
+      if (request.structuredOutput !== undefined) {
+        throw new Error("This model does not support structured output");
+      }
+      yield {
+        type: "text-delta",
+        text: JSON.stringify({
+          shouldRespond: true,
+          urgency: 0.2,
+          confidence: 0.2,
+          intendedMove: "extend",
+          reason: "Useful contribution"
+        })
+      };
+      yield { type: "done", finishReason: "stop" };
+      return;
+    }
+    yield { type: "text-delta", text: "Automatic response." };
     yield { type: "done", finishReason: "stop" };
   }
 }
@@ -700,6 +752,64 @@ describe("local HTTP room seam", () => {
       consecutiveTurns: 0
     }]);
     await workspace.waitForEnrichment();
+    store.close();
+  });
+
+  it("auto-replies through a model that does not support structured output", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-auto-unstructured-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const provider = new UnstructuredAutoReplyProvider();
+    const application = createHttpApplication({
+      store,
+      providers: new Map([[provider.id, provider]])
+    });
+    const room = store.createRoom({
+      title: "Unstructured activation room",
+      settings: {
+        maxResponders: 1,
+        maxAutonomousWaves: 1,
+        maxAutonomousReplies: 1
+      }
+    });
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send({
+        id: "plain-json-voice",
+        name: "Plain JSON Voice",
+        description: "Contributes without provider-enforced schemas.",
+        provider: "openrouter",
+        modelId: "fixture/unstructured",
+        systemPrompt: "Advance the discussion.",
+        temperature: 0.5,
+        maxOutputTokens: 600,
+        reasoning: { enabled: false, displayMode: "hidden" },
+        tools: [],
+        contextBudget: {
+          softLimitTokens: 12_000,
+          hardLimitTokens: 16_000,
+          recentTranscriptTokens: 8_000,
+          retrievedContextTokens: 2_000,
+          notebookTokens: 0
+        }
+      })
+      .expect(201);
+
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/messages`)
+      .send({ content: "Offer one useful thought." })
+      .expect(201);
+
+    await vi.waitFor(() => {
+      expect(store.listMessages(room.id).map(message => message.content)).toEqual([
+        "Offer one useful thought.",
+        "Automatic response."
+      ]);
+    });
+    expect(provider.activationRequest?.structuredOutput).toBeUndefined();
+    expect(store.getSnapshot(room.id).activations).toMatchObject([{
+      decision: { shouldRespond: true }
+    }]);
     store.close();
   });
 
