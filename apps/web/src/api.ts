@@ -2,6 +2,8 @@ import type {
   AgentDefinition,
   DefaultModelSelection,
   ModelDescriptor,
+  ProviderConnectionStatus,
+  ProviderConnectionUpdate,
   Room,
   RoomSettings,
   RoomSnapshot,
@@ -72,6 +74,31 @@ export const api = {
       `/api/v1/providers/${encodeURIComponent(provider)}/models`,
       signal === undefined ? undefined : { signal }
     )).models;
+  },
+
+  async listProviderConnections(): Promise<ProviderConnectionStatus[]> {
+    return (await requestJson<{ providers: ProviderConnectionStatus[] }>(
+      "/api/v1/settings/providers"
+    )).providers ?? [];
+  },
+
+  async configureProvider(
+    provider: AgentDefinition["provider"],
+    update: ProviderConnectionUpdate
+  ): Promise<ProviderConnectionStatus> {
+    return (await requestJson<{ provider: ProviderConnectionStatus }>(
+      `/api/v1/settings/providers/${encodeURIComponent(provider)}`,
+      { method: "PUT", body: JSON.stringify(update) }
+    )).provider;
+  },
+
+  async removeProviderConfiguration(
+    provider: AgentDefinition["provider"]
+  ): Promise<ProviderConnectionStatus> {
+    return (await requestJson<{ provider: ProviderConnectionStatus }>(
+      `/api/v1/settings/providers/${encodeURIComponent(provider)}`,
+      { method: "DELETE" }
+    )).provider;
   },
 
   async getDefaultModel(): Promise<DefaultModelSelection | undefined> {

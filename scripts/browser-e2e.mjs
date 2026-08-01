@@ -240,6 +240,25 @@ try {
 
   await page.getByRole("button", { name: "Open settings" }).click();
   await page.getByRole("button", { name: "Providers & models" }).click();
+  const providerConnectionForm = page.locator(".provider-connection-card");
+  await providerConnectionForm.waitFor();
+  assert.equal(
+    await providerConnectionForm.locator('input[type="password"]').getAttribute("data-1p-ignore"),
+    "true",
+    "Provider credential field was not protected from password-manager capture"
+  );
+  await page.locator(".provider-strip button").filter({
+    hasText: "OpenAI-compatible"
+  }).click();
+  assert.equal(
+    await providerConnectionForm.locator('input[type="url"]').isEditable(),
+    true,
+    "OpenAI-compatible base URL cannot be configured"
+  );
+  await providerConnectionForm.getByRole("button", {
+    name: "Save & load models"
+  }).waitFor();
+  await page.locator(".provider-strip button").filter({ hasText: "OpenRouter" }).click();
   const catalogSearch = page.getByPlaceholder("Search the catalog…");
   await catalogSearch.waitFor();
   await catalogSearch.fill("moonshotai/kimi-k3");
@@ -670,6 +689,7 @@ try {
     roomModesConfigured: 4,
     personaLibraryUploaded: true,
     voiceReferenceManagedInSettings: true,
+    providerConnectionsManagedInSettings: true,
     repositoryDirectoryUploaded: true,
     composerIgnoredByPasswordManagers: true,
     requiredFieldWarning: true,

@@ -9,6 +9,7 @@ import {
   defaultModelSelectionSchema,
   defaultRoomSettings,
   generationRecordSchema,
+  providerConnectionConfigurationSchema,
   roomMessageSchema,
   roomSchema,
   roomSettingsSchema,
@@ -21,6 +22,7 @@ import {
   type DefaultModelSelection,
   type ConversationEpisode,
   type GenerationRecord,
+  type ProviderConnectionConfiguration,
   type Room,
   type RoomMessage,
   type RoomSettings,
@@ -66,6 +68,7 @@ interface JsonRow {
 }
 
 const DEFAULT_MODEL_SETTING_KEY = "default_model" as const;
+const PROVIDER_CONNECTIONS_SETTING_KEY = "provider_connections" as const;
 
 type RoomSettingsPatch = {
   [Key in keyof RoomSettings]?: RoomSettings[Key] | undefined;
@@ -319,6 +322,54 @@ export class RoomStore {
       new Date().toISOString()
     );
     return parsed;
+  }
+
+  listProviderConnectionConfigurations(): ProviderConnectionConfiguration[] {
+    const row = this.database.prepare(
+      "SELECT payload_json FROM application_settings WHERE key = ?"
+    ).get(PROVIDER_CONNECTIONS_SETTING_KEY) as JsonRow | undefined;
+    if (row === undefined) return [];
+    return providerConnectionConfigurationSchema.array().parse(
+      JSON.parse(row.payload_json)
+    );
+  }
+
+  setProviderConnectionConfiguration(
+    configuration: ProviderConnectionConfiguration
+  ): ProviderConnectionConfiguration {
+    const parsed = providerConnectionConfigurationSchema.parse(configuration);
+    const configurations = this.listProviderConnectionConfigurations()
+      .filter(candidate => candidate.provider !== parsed.provider);
+    configurations.push(parsed);
+    this.writeProviderConnectionConfigurations(configurations);
+    return parsed;
+  }
+
+  deleteProviderConnectionConfiguration(
+    provider: ProviderConnectionConfiguration["provider"]
+  ): boolean {
+    const current = this.listProviderConnectionConfigurations();
+    const next = current.filter(candidate => candidate.provider !== provider);
+    if (next.length === current.length) return false;
+    this.writeProviderConnectionConfigurations(next);
+    return true;
+  }
+
+  private writeProviderConnectionConfigurations(
+    configurations: ProviderConnectionConfiguration[]
+  ): void {
+    const parsed = providerConnectionConfigurationSchema.array().parse(configurations);
+    this.database.prepare(`
+      INSERT INTO application_settings(key, payload_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+    `).run(
+      PROVIDER_CONNECTIONS_SETTING_KEY,
+      JSON.stringify(parsed),
+      new Date().toISOString()
+    );
   }
 
   createVoiceTemplate(input: VoiceTemplateInput): VoiceTemplate {

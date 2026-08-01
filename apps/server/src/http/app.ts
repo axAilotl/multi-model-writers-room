@@ -15,6 +15,7 @@ import type {
   WorkspaceArtifact
 } from "@writers-room/contracts";
 import type { ModelProvider } from "../providers/model-provider.js";
+import { ProviderConnectionManager } from "../providers/provider-connections.js";
 import { RoomEngine } from "../room/room-engine.js";
 import { ParticipantModelActivationEvaluator } from "../scheduler/activation-evaluator.js";
 import { ConversationScheduler } from "../scheduler/scheduler.js";
@@ -25,7 +26,8 @@ import { generateVoiceTemplate } from "../voices/voice-template-generator.js";
 
 interface ApplicationOptions {
   store: RoomStore;
-  providers: ReadonlyMap<string, ModelProvider>;
+  providers: Map<string, ModelProvider>;
+  providerConnections?: ProviderConnectionManager;
   workspace?: WorkspaceService;
   tools?: ToolExecutor;
   automaticScheduling?: boolean;
@@ -142,6 +144,8 @@ function asyncRoute(
 
 export function createHttpApplication(options: ApplicationOptions): express.Express {
   const application = express();
+  const providerConnections = options.providerConnections ??
+    new ProviderConnectionManager(options.store, options.providers);
   const engine = new RoomEngine(options.store, options.providers, options.tools);
   const scheduler = new ConversationScheduler({
     store: options.store,
@@ -287,12 +291,42 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     });
   });
 
+  application.get("/api/v1/settings/providers", (_request, response) => {
+    response.json({ providers: providerConnections.list() });
+  });
+
+  application.put(
+    "/api/v1/settings/providers/:providerId",
+    (request, response) => {
+      response.json({
+        provider: providerConnections.configure(
+          String(request.params.providerId),
+          request.body
+        )
+      });
+    }
+  );
+
+  application.delete(
+    "/api/v1/settings/providers/:providerId",
+    (request, response) => {
+      response.json({
+        provider: providerConnections.remove(String(request.params.providerId))
+      });
+    }
+  );
+
   application.get(
     "/api/v1/providers/:providerId/models",
     asyncRoute(async (request, response) => {
       const providerId = String(request.params.providerId);
       const provider = options.providers.get(providerId);
-      if (!provider) throw new Error(`Provider not found: ${providerId}`);
+      if (!provider) {
+        response.status(409).json({
+          error: `Provider is not configured: ${providerId}. Add its endpoint and credentials under Settings → Providers & models.`
+        });
+        return;
+      }
       const models = await provider.listModels();
       response.json({
         provider: providerId,

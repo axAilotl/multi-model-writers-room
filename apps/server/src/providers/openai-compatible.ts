@@ -362,10 +362,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
   }
 
   private async providerError(response: Response): Promise<Error> {
-    const text = await response.text();
-    const clipped = text.slice(0, 2_000);
-    return new Error(
-      `Provider ${this.id} returned ${response.status}: ${clipped || response.statusText}`
-    );
+    await response.body?.cancel().catch(() => undefined);
+    return new Error(`Provider ${this.id} returned HTTP ${response.status}`);
   }
 }

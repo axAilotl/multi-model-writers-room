@@ -103,13 +103,21 @@ generation and persistence path.
 
 ## Providers and configuration
 
-Provider credentials remain server-side. The browser receives model catalogs
-and capabilities, never API keys.
+Provider connections can be added and replaced under **Settings → Providers &
+models**. OpenRouter accepts a key, Ollama accepts a base URL and optional key,
+and the generic OpenAI-compatible connection accepts a base URL and optional
+key. Changes take effect immediately without restarting the room server.
+
+Credentials remain server-side. Keys saved through Settings are persisted in
+the local, git-ignored SQLite database; API responses expose only whether a
+credential exists. Environment variables remain available for unattended
+startup and are restored when a saved override is removed.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | Enables OpenRouter and its live model catalog | unset |
 | `OLLAMA_BASE_URL` | Ollama’s OpenAI-compatible API | `http://127.0.0.1:11434/v1` |
+| `OLLAMA_API_KEY` | Optional key for an authenticated Ollama proxy | unset |
 | `OPENAI_COMPATIBLE_BASE_URL` | Generic OpenAI-compatible endpoint | unset |
 | `OPENAI_COMPATIBLE_API_KEY` | Optional key for the generic endpoint | unset |
 | `WRITERS_ROOM_DATA_DIR` | SQLite, blobs, model cache, and generated local state | `./data` |

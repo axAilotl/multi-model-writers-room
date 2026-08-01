@@ -5,9 +5,7 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import type { ModelProvider } from "./providers/model-provider.js";
-import { createOllamaProvider } from "./providers/ollama.js";
-import { OpenAiCompatibleProvider } from "./providers/openai-compatible.js";
-import { createOpenRouterProvider } from "./providers/openrouter.js";
+import { ProviderConnectionManager } from "./providers/provider-connections.js";
 import { createHttpApplication } from "./http/app.js";
 import { LocalModelWorker } from "./ml/local-models.js";
 import { RoomStore } from "./storage/room-store.js";
@@ -25,32 +23,6 @@ export interface WritersRoomRuntime {
   localModels: LocalModelWorker;
   address: () => AddressInfo | null;
   close: () => Promise<void>;
-}
-
-function providerRegistry(): Map<string, ModelProvider> {
-  const providers = new Map<string, ModelProvider>();
-  const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
-  if (openRouterKey) {
-    providers.set("openrouter", createOpenRouterProvider({
-      apiKey: openRouterKey,
-      appName: "Multi-Model Writers' Room"
-    }));
-  }
-  const ollamaBaseUrl = process.env.OLLAMA_BASE_URL?.trim();
-  providers.set("ollama", createOllamaProvider(
-    ollamaBaseUrl ? { baseUrl: ollamaBaseUrl } : undefined
-  ));
-  const genericUrl = process.env.OPENAI_COMPATIBLE_BASE_URL?.trim();
-  if (genericUrl) {
-    providers.set("openai-compatible", new OpenAiCompatibleProvider({
-      id: "openai-compatible",
-      baseUrl: genericUrl,
-      ...(process.env.OPENAI_COMPATIBLE_API_KEY
-        ? { apiKey: process.env.OPENAI_COMPATIBLE_API_KEY }
-        : {})
-    }));
-  }
-  return providers;
 }
 
 function bindRoomWebSocket(server: Server, store: RoomStore): () => void {
@@ -123,11 +95,17 @@ export async function startRuntime(input?: {
     embeddings: input?.workspaceModels?.embeddings ?? localModels,
     housekeeping: input?.workspaceModels?.housekeeping ?? extractiveHousekeepingModel
   });
-  const providers = input?.providers ?? providerRegistry();
+  const providers = new Map(input?.providers ?? []);
+  const providerConnections = new ProviderConnectionManager(
+    store,
+    providers,
+    input?.providers === undefined ? process.env : {}
+  );
   const tools = new RoomToolExecutor(store, workspace, providers);
   const app = createHttpApplication({
     store,
     providers,
+    providerConnections,
     workspace,
     tools
   });

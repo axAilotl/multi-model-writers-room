@@ -28,21 +28,25 @@ class OllamaProvider implements ModelProvider {
   private readonly compatible: OpenAiCompatibleProvider;
   private readonly fetcher: typeof fetch;
   private readonly nativeBaseUrl: string;
+  private readonly apiKey: string | undefined;
   private readonly overrides: Record<string, ModelCapabilities>;
   private readonly nativeMetadata = new Map<string, Promise<OllamaShowResponse | undefined>>();
 
   constructor(input?: {
     baseUrl?: string;
+    apiKey?: string;
     capabilityOverrides?: Record<string, ModelCapabilities>;
     fetcher?: typeof fetch;
   }) {
     const baseUrl = input?.baseUrl ?? "http://127.0.0.1:11434/v1";
     this.fetcher = input?.fetcher ?? fetch;
     this.nativeBaseUrl = nativeBaseUrl(baseUrl);
+    this.apiKey = input?.apiKey;
     this.overrides = input?.capabilityOverrides ?? {};
     this.compatible = new OpenAiCompatibleProvider({
       id: this.id,
       baseUrl,
+      ...(input?.apiKey === undefined ? {} : { apiKey: input.apiKey }),
       capabilityOverrides: this.overrides,
       ...(input?.fetcher === undefined ? {} : { fetcher: input.fetcher })
     });
@@ -89,7 +93,10 @@ class OllamaProvider implements ModelProvider {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        accept: "application/json"
+        accept: "application/json",
+        ...(this.apiKey === undefined
+          ? {}
+          : { authorization: `Bearer ${this.apiKey}` })
       },
       body: JSON.stringify({ model: modelId }),
       signal: AbortSignal.timeout(5_000)
@@ -109,6 +116,7 @@ class OllamaProvider implements ModelProvider {
 
 export function createOllamaProvider(input?: {
   baseUrl?: string;
+  apiKey?: string;
   capabilityOverrides?: Record<string, ModelCapabilities>;
   fetcher?: typeof fetch;
 }): ModelProvider {

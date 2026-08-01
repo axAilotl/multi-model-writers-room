@@ -5,7 +5,10 @@ import type {
 } from "@writers-room/contracts";
 import { api } from "./api.js";
 
-export function useProviderModels(provider: AgentDefinition["provider"]) {
+export function useProviderModels(
+  provider: AgentDefinition["provider"],
+  enabled = true
+) {
   const [models, setModels] = useState<ModelDescriptor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -17,6 +20,13 @@ export function useProviderModels(provider: AgentDefinition["provider"]) {
     setLoading(true);
     setError(undefined);
     setModels([]);
+    if (!enabled) {
+      setLoading(false);
+      return () => {
+        active = false;
+        controller.abort();
+      };
+    }
 
     void (async () => {
       try {
@@ -35,7 +45,7 @@ export function useProviderModels(provider: AgentDefinition["provider"]) {
       active = false;
       controller.abort();
     };
-  }, [provider, revision]);
+  }, [enabled, provider, revision]);
 
   const refresh = useCallback(() => {
     setRevision(current => current + 1);

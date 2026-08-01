@@ -24,9 +24,9 @@ function extractJson(text: string): unknown {
 }
 
 export class ParticipantModelActivationEvaluator {
-  private readonly reasoningSupport = new Map<
-    string,
-    Promise<ModelDescriptor["reasoning"] | undefined>
+  private readonly reasoningSupport = new WeakMap<
+    ModelProvider,
+    Map<string, Promise<ModelDescriptor["reasoning"] | undefined>>
   >();
 
   constructor(private readonly providers: ReadonlyMap<string, ModelProvider>) {}
@@ -123,13 +123,17 @@ export class ParticipantModelActivationEvaluator {
     if (!agent.capabilities?.reasoningInputControl) {
       return { enabled: false, displayMode: "hidden" };
     }
-    const key = `${provider.id}\u0000${agent.modelId}`;
-    let lookup = this.reasoningSupport.get(key);
+    let providerSupport = this.reasoningSupport.get(provider);
+    if (!providerSupport) {
+      providerSupport = new Map();
+      this.reasoningSupport.set(provider, providerSupport);
+    }
+    let lookup = providerSupport.get(agent.modelId);
     if (!lookup) {
       lookup = provider.listModels()
         .then(models => models.find(model => model.id === agent.modelId)?.reasoning)
         .catch(() => undefined);
-      this.reasoningSupport.set(key, lookup);
+      providerSupport.set(agent.modelId, lookup);
     }
     const support = await lookup;
     const effortOrder: ReasoningEffort[] = [

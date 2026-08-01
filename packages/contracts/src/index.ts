@@ -1,11 +1,41 @@
 import { z } from "zod";
 
-export const providerKindSchema = z.enum([
+export const providerKinds = [
   "openrouter",
   "ollama",
   "openai-compatible"
-]);
+] as const;
+export const providerKindSchema = z.enum(providerKinds);
 export type ProviderKind = z.infer<typeof providerKindSchema>;
+
+export const providerConnectionConfigurationSchema = z.object({
+  provider: providerKindSchema,
+  baseUrl: z.string().trim().min(1).max(2_048).optional(),
+  apiKey: z.string().min(1).max(32_768).optional()
+});
+export type ProviderConnectionConfiguration = z.infer<
+  typeof providerConnectionConfigurationSchema
+>;
+
+export const providerConnectionUpdateSchema = z.object({
+  baseUrl: z.string().trim().min(1).max(2_048).optional(),
+  apiKey: z.string().min(1).max(32_768).optional()
+});
+export type ProviderConnectionUpdate = z.infer<
+  typeof providerConnectionUpdateSchema
+>;
+
+export const providerConnectionStatusSchema = z.object({
+  provider: providerKindSchema,
+  configured: z.boolean(),
+  baseUrl: z.string().optional(),
+  hasApiKey: z.boolean(),
+  endpointSource: z.enum(["settings", "environment", "built-in", "runtime", "none"]),
+  credentialSource: z.enum(["settings", "environment", "runtime", "none"])
+});
+export type ProviderConnectionStatus = z.infer<
+  typeof providerConnectionStatusSchema
+>;
 
 export const reasoningEffortSchema = z.enum([
   "minimal",

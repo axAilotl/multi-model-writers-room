@@ -10,6 +10,7 @@ import type {
 } from "@writers-room/contracts";
 import { createHttpApplication } from "./app.js";
 import type { ModelProvider, ModelDescriptor } from "../providers/model-provider.js";
+import { ProviderConnectionManager } from "../providers/provider-connections.js";
 import { RoomStore } from "../storage/room-store.js";
 import { WorkspaceService } from "../workspace/workspace-service.js";
 
@@ -240,10 +241,188 @@ class AbortableGenerationProvider extends FixtureProvider {
 const roots: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("local HTTP room seam", () => {
+  it("configures an OpenAI-compatible provider without exposing its key", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const databasePath = join(root, "room.db");
+    const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer local-secret");
+      return new Response(JSON.stringify({
+        data: [{ id: "local/test-model", name: "Local test model" }]
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    const firstStore = new RoomStore(databasePath);
+    const firstProviders = new Map<string, ModelProvider>();
+    const firstApplication = createHttpApplication({
+      store: firstStore,
+      providers: firstProviders
+    });
+
+    const unconfigured = await request(firstApplication)
+      .get("/api/v1/providers/openai-compatible/models")
+      .expect(409);
+    expect(unconfigured.body.error).toContain(
+      "Settings → Providers & models"
+    );
+
+    const saved = await request(firstApplication)
+      .put("/api/v1/settings/providers/openai-compatible")
+      .send({
+        baseUrl: "https://compatible.example/v1",
+        apiKey: "local-secret"
+      })
+      .expect(200);
+    expect(saved.body.provider).toMatchObject({
+      provider: "openai-compatible",
+      configured: true,
+      baseUrl: "https://compatible.example/v1",
+      hasApiKey: true,
+      endpointSource: "settings",
+      credentialSource: "settings"
+    });
+    expect(JSON.stringify(saved.body)).not.toContain("local-secret");
+
+    const models = await request(firstApplication)
+      .get("/api/v1/providers/openai-compatible/models")
+      .expect(200);
+    expect(models.body.models).toEqual([
+      expect.objectContaining({ id: "local/test-model" })
+    ]);
+    firstStore.close();
+
+    const reopenedStore = new RoomStore(databasePath);
+    const reopenedProviders = new Map<string, ModelProvider>();
+    const reopenedApplication = createHttpApplication({
+      store: reopenedStore,
+      providers: reopenedProviders
+    });
+    const settings = await request(reopenedApplication)
+      .get("/api/v1/settings/providers")
+      .expect(200);
+    expect(settings.body.providers).toContainEqual(saved.body.provider);
+    expect(JSON.stringify(settings.body)).not.toContain("local-secret");
+    await request(reopenedApplication)
+      .get("/api/v1/providers/openai-compatible/models")
+      .expect(200);
+    reopenedStore.close();
+  });
+
+  it("does not carry a credential to a different compatible endpoint", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBeNull();
+      return new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      OPENAI_COMPATIBLE_BASE_URL: "https://first.example/v1",
+      OPENAI_COMPATIBLE_API_KEY: "first-endpoint-secret"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    const saved = await request(application)
+      .put("/api/v1/settings/providers/openai-compatible")
+      .send({ baseUrl: "https://second.example/v1" })
+      .expect(200);
+    expect(saved.body.provider).toMatchObject({
+      baseUrl: "https://second.example/v1",
+      hasApiKey: false,
+      endpointSource: "settings",
+      credentialSource: "none"
+    });
+    await request(application)
+      .get("/api/v1/providers/openai-compatible/models")
+      .expect(200);
+    store.close();
+  });
+
+  it("reports an Ollama environment key as environment configuration", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      OLLAMA_API_KEY: "ollama-proxy-secret"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    const settings = await request(application)
+      .get("/api/v1/settings/providers")
+      .expect(200);
+    expect(settings.body.providers).toContainEqual(expect.objectContaining({
+      provider: "ollama",
+      endpointSource: "built-in",
+      credentialSource: "environment",
+      hasApiKey: true
+    }));
+    expect(JSON.stringify(settings.body)).not.toContain("ollama-proxy-secret");
+    store.close();
+  });
+
+  it("preserves an injected Ollama provider until settings override it", () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const injected = new FixtureProvider();
+    const providers = new Map<string, ModelProvider>([["ollama", injected]]);
+
+    new ProviderConnectionManager(store, providers);
+
+    expect(providers.get("ollama")).toBe(injected);
+    store.close();
+  });
+
+  it("does not relay an upstream response body that echoes a provider key", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "rejected authorization: Bearer echoed-provider-secret",
+      { status: 401, statusText: "echoed-provider-secret" }
+    )));
+    const providers = new Map<string, ModelProvider>();
+    const application = createHttpApplication({ store, providers });
+    await request(application)
+      .put("/api/v1/settings/providers/openai-compatible")
+      .send({
+        baseUrl: "https://untrusted.example/v1",
+        apiKey: "echoed-provider-secret"
+      })
+      .expect(200);
+
+    const response = await request(application)
+      .get("/api/v1/providers/openai-compatible/models")
+      .expect(500);
+    expect(response.body.error).toContain("401");
+    expect(JSON.stringify(response.body)).not.toContain("echoed-provider-secret");
+    expect(JSON.stringify(response.body)).not.toContain("rejected authorization");
+    store.close();
+  });
+
   it("exposes the configured provider model catalog", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
     roots.push(root);

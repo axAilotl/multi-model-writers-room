@@ -489,6 +489,49 @@ describe("App effect lifecycle", () => {
           database: true,
           providers: ["openrouter"]
         };
+      } else if (
+        path.endsWith("/api/v1/settings/providers/openai-compatible") &&
+        init?.method === "PUT"
+      ) {
+        payload = {
+          provider: {
+            provider: "openai-compatible",
+            configured: true,
+            baseUrl: requestBody<{ baseUrl: string }>(init).baseUrl,
+            hasApiKey: true,
+            endpointSource: "settings",
+            credentialSource: "settings"
+          }
+        };
+      } else if (path.endsWith("/api/v1/settings/providers")) {
+        payload = {
+          providers: [
+            {
+              provider: "openrouter",
+              configured: true,
+              baseUrl: "https://openrouter.ai/api/v1",
+              hasApiKey: true,
+              endpointSource: "environment",
+              credentialSource: "environment"
+            },
+            {
+              provider: "ollama",
+              configured: false,
+              baseUrl: "http://127.0.0.1:11434/v1",
+              hasApiKey: false,
+              endpointSource: "built-in",
+              credentialSource: "none"
+            },
+            {
+              provider: "openai-compatible",
+              configured: true,
+              baseUrl: "http://127.0.0.1:40000/v1",
+              hasApiKey: true,
+              endpointSource: "environment",
+              credentialSource: "settings"
+            }
+          ]
+        };
       } else if (path.endsWith("/api/v1/settings/default-model")) {
         payload = init?.method === "PUT"
           ? {
@@ -553,6 +596,25 @@ describe("App effect lifecycle", () => {
               }
             }
           ]
+        };
+      } else if (path.includes("/api/v1/providers/openai-compatible/models")) {
+        payload = {
+          provider: "openai-compatible",
+          models: [{
+            id: "local/test-model",
+            name: "Local test model",
+            capabilities: {
+              contextLength: 128_000,
+              textInput: true,
+              imageInput: false,
+              pdfInput: false,
+              toolCalling: true,
+              structuredOutput: true,
+              reasoningInputControl: true,
+              reasoningOutput: true,
+              promptCaching: false
+            }
+          }]
         };
       } else if (
         path.endsWith("/api/v1/rooms/room-1") &&
@@ -784,6 +846,56 @@ describe("App effect lifecycle", () => {
         '"modelId":"provider/extremely-long-model-identifier-that-must-stay-contained"'
       ));
     expect(document.body.textContent).toContain("Current default");
+
+    const compatibleProvider = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".provider-strip button"
+    )).find(button => button.textContent?.includes("OpenAI-compatible"));
+    await act(async () => compatibleProvider!.click());
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>(
+      ".provider-connection-card button"
+    )).some(button => button.textContent?.includes("Remove saved connection")))
+      .toBe(true);
+    const connectionForm = document.querySelector<HTMLFormElement>(
+      ".provider-connection-card"
+    );
+    const connectionUrl = connectionForm?.querySelector<HTMLInputElement>(
+      'input[type="url"]'
+    );
+    const connectionKey = connectionForm?.querySelector<HTMLInputElement>(
+      'input[type="password"]'
+    );
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
+        ?.set?.call(connectionUrl, "http://127.0.0.1:40123/v1");
+      connectionUrl!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain(
+      "The current credential is scoped to the old endpoint and will not be reused."
+    );
+    expect(connectionKey?.placeholder).toBe("Enter a key for the new endpoint");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
+        ?.set?.call(connectionKey, "browser-only-secret");
+      connectionKey!.dispatchEvent(new Event("input", { bubbles: true }));
+      connectionForm!.dispatchEvent(new Event("submit", {
+        bubbles: true,
+        cancelable: true
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    const providerSave = fetchMock.mock.calls.find(([input, init]) =>
+      String(input).endsWith("/api/v1/settings/providers/openai-compatible") &&
+      init?.method === "PUT"
+    );
+    expect(String(providerSave?.[1]?.body)).toContain(
+      '"baseUrl":"http://127.0.0.1:40123/v1"'
+    );
+    expect(String(providerSave?.[1]?.body)).toContain(
+      '"apiKey":"browser-only-secret"'
+    );
+    expect(connectionKey?.value).toBe("");
+    expect(document.body.textContent).not.toContain("browser-only-secret");
+    expect(document.body.textContent).toContain("Local test model");
 
     const conversation = Array.from(document.querySelectorAll<HTMLButtonElement>(
       ".settings-layout nav button"
