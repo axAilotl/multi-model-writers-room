@@ -333,6 +333,13 @@ try {
   await page.getByRole("button", { name: "Add participant" }).click();
   await page.locator(".participant").filter({ hasText: "Browser Architect" }).waitFor();
   assert.equal(await page.locator(".participant").count(), 2);
+  const roomComposer = page.getByRole("textbox", { name: "Room message" });
+  assert.equal(await roomComposer.getAttribute("autocomplete"), "off");
+  assert.notEqual(
+    await roomComposer.getAttribute("data-1p-ignore"),
+    null,
+    "The room composer is not marked as a non-credential field for 1Password"
+  );
   await page.screenshot({
     path: join(evidenceRoot, "two-added-participants.png"),
     fullPage: true
@@ -536,6 +543,7 @@ try {
     templatesSaved: 2,
     participantsAdded: 2,
     participantsRemoved: 1,
+    composerIgnoredByPasswordManagers: true,
     requiredFieldWarning: true,
     settingsAvailableDuringGeneration: true,
     realConversationCompleted: true,

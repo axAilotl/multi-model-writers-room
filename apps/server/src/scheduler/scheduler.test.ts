@@ -43,6 +43,68 @@ afterEach(() => {
 });
 
 describe("conversation scheduler seam", () => {
+  it("admits a willing participant even when its ranking score is below the old cutoff", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-willing-candidate-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({
+      title: "Willing candidate room",
+      settings: { maxResponders: 1, maxAutonomousWaves: 1 }
+    });
+    store.addAgent(room.id, agent("alpha"));
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "What do you make of this idea?"
+    });
+    const evaluator: ActivationEvaluator = {
+      evaluate: async () => ({
+        shouldRespond: true,
+        urgency: 0.1,
+        confidence: 0.1,
+        intendedMove: "extend",
+        reason: "I have a useful but non-urgent contribution"
+      })
+    };
+    const spoken: string[] = [];
+    const generator: SpeakerGenerator = {
+      generate: async input => {
+        spoken.push(input.agentId);
+        const message = store.appendMessage({
+          roomId: input.roomId,
+          authorType: "agent",
+          authorId: input.agentId,
+          content: "A useful contribution."
+        });
+        return {
+          message,
+          generation: {
+            id: `generation-${input.agentId}`,
+            roomId: input.roomId,
+            messageId: message.id,
+            agentId: input.agentId,
+            provider: "openrouter",
+            requestedModelId: "fixture",
+            status: "complete",
+            finalText: message.content,
+            retrievedChunkIds: [],
+            outputTokens: 40,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          }
+        };
+      }
+    };
+    const scheduler = new ConversationScheduler({ store, evaluator, generator });
+
+    const result = await scheduler.runFromHumanMessage(room.id, human.id);
+
+    expect(result).toMatchObject({ waves: 1, replies: 1, stopReason: "wave_cap" });
+    expect(spoken).toEqual(["alpha"]);
+    store.close();
+  });
+
   it("launches the top candidates in one bounded parallel wave and records fatigue", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-scheduler-"));
     roots.push(root);

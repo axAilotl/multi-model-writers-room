@@ -103,6 +103,10 @@ describe("App effect lifecycle", () => {
     const composer = container.querySelector<HTMLTextAreaElement>(
       ".composer textarea"
     )!;
+    expect(composer.name).toBe("roomMessage");
+    expect(composer.autocomplete).toBe("off");
+    expect(composer.hasAttribute("data-1p-ignore")).toBe(true);
+    expect(composer.form?.getAttribute("autocomplete")).toBe("off");
     const unsent = "This message must survive a gateway failure.";
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")

@@ -13,6 +13,7 @@ import {
   recoverForHuman,
   recoverIdle
 } from "./fatigue.js";
+import { arbitrateSpeakers } from "./speaker-arbiter.js";
 
 export interface ActivationEvaluator {
   evaluate(input: ActivationEvaluationInput): Promise<ActivationDecision>;
@@ -164,22 +165,22 @@ export class ConversationScheduler {
           decision,
           score
         });
-        if (!directlyMentioned && (!decision.shouldRespond || score < 0.45)) {
+        if (!directlyMentioned && !decision.shouldRespond) {
           return undefined;
         }
         return { agent, decision, score, directlyMentioned } satisfies ScoredCandidate;
       }));
-      const selected = candidates
-        .filter((candidate): candidate is ScoredCandidate => candidate !== undefined)
-        .sort((left, right) =>
-          Number(right.directlyMentioned) - Number(left.directlyMentioned) ||
-          right.score - left.score ||
-          left.agent.id.localeCompare(right.agent.id)
-        )
-        .slice(0, Math.min(
-          snapshot.room.settings.maxResponders,
-          remainingReplies
-        ));
+      const selected = arbitrateSpeakers({
+        candidates: candidates
+          .filter((candidate): candidate is ScoredCandidate => candidate !== undefined)
+          .map(candidate => ({
+            value: candidate,
+            agentId: candidate.agent.id,
+            directlyMentioned: candidate.directlyMentioned
+          })),
+        messages: snapshot.messages,
+        limit: Math.min(snapshot.room.settings.maxResponders, remainingReplies)
+      });
       if (selected.length === 0) {
         return { waves, replies, stopReason: "silence" };
       }

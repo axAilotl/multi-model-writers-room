@@ -1431,6 +1431,7 @@ export default function App() {
           />
           <form
             className="composer"
+            autoComplete="off"
             onSubmit={event => {
               event.preventDefault();
               if (busy) return;
@@ -1466,6 +1467,11 @@ export default function App() {
               </div>
             )}
             <textarea
+              aria-label="Room message"
+              autoComplete="off"
+              data-1p-ignore
+              data-lpignore="true"
+              name="roomMessage"
               value={composer}
               onChange={event => {
                 setComposer(event.target.value);
@@ -1501,7 +1507,7 @@ export default function App() {
               <div>
                 <span>Enter to send · Shift+Enter for a new line</span>
               </div>
-              <button className="send-button" disabled={!composer.trim() || busy}>
+              <button type="submit" className="send-button" disabled={!composer.trim() || busy}>
                 {busy ? <LoaderCircle size={16} className="spin" /> : <Send size={16} />}
               </button>
             </div>
