@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx src/dev.ts",
     "start": "node dist/main.js"
   },
   "dependencies": {

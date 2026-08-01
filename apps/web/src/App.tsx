@@ -1230,6 +1230,29 @@ export default function App() {
     }
   }
 
+  async function sendComposerMessage(input: {
+    roomId: string;
+    draft: string;
+    content: string;
+    mentionedAgentIds: string[];
+  }): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      // Keep the draft visible until the server confirms it was durably
+      // accepted. A gateway failure must never turn a typed message into an
+      // apparently successful, empty composer.
+      await api.sendMessage(input.roomId, input.content, input.mentionedAgentIds);
+      setComposer(current => current === input.draft ? "" : current);
+      await refresh(input.roomId);
+    } catch (errorValue) {
+      setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function createRoom(title: string): Promise<boolean> {
     setError(undefined);
     try {
@@ -1410,10 +1433,16 @@ export default function App() {
             className="composer"
             onSubmit={event => {
               event.preventDefault();
+              if (busy) return;
+              const draft = composer;
               const content = composer.trim();
               if (!content) return;
-              setComposer("");
-              void runRoomAction(() => api.sendMessage(snapshot.room.id, content, mentions));
+              void sendComposerMessage({
+                roomId: snapshot.room.id,
+                draft,
+                content,
+                mentionedAgentIds: [...mentions]
+              });
             }}
           >
             {mentionSuggestions.length > 0 && (

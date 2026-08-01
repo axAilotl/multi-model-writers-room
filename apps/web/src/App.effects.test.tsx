@@ -64,6 +64,70 @@ afterEach(() => {
 });
 
 describe("App effect lifecycle", () => {
+  it("keeps an unsent message in the composer when the API gateway rejects it", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => {}
+    });
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      const path = String(input);
+      if (
+        path.endsWith(`/api/v1/rooms/${room.id}/messages`) &&
+        init?.method === "POST"
+      ) {
+        return new Response(JSON.stringify({ error: "Bad gateway" }), {
+          status: 502,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      const payload = path.endsWith("/api/v1/rooms")
+        ? { rooms: [room] }
+        : snapshot;
+      return new Response(JSON.stringify(payload), {
+        headers: { "content-type": "application/json" }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    const composer = container.querySelector<HTMLTextAreaElement>(
+      ".composer textarea"
+    )!;
+    const unsent = "This message must survive a gateway failure.";
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")
+        ?.set?.call(composer, unsent);
+      composer.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      composer.form?.dispatchEvent(new Event("submit", {
+        bubbles: true,
+        cancelable: true
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v1/rooms/${room.id}/messages`,
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(composer.value).toBe(unsent);
+    expect(container.querySelector(".error-toast")?.textContent)
+      .toContain("Bad gateway");
+
+    await act(async () => root.unmount());
+  });
+
   it("mounts and unmounts under Strict Mode when scrolling returns a promise", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.stubGlobal("WebSocket", FakeWebSocket);
