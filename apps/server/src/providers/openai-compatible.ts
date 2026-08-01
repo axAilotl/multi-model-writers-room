@@ -4,7 +4,11 @@ import type {
   NormalizedGenerationEvent,
   ReasoningEffort
 } from "@writers-room/contracts";
-import type { ModelDescriptor, ModelProvider } from "./model-provider.js";
+import {
+  statelessModelExecution,
+  type ModelDescriptor,
+  type ModelProvider
+} from "./model-provider.js";
 
 interface ProviderOptions {
   id: string;
@@ -277,6 +281,7 @@ function deltaEvents(
 
 export class OpenAiCompatibleProvider implements ModelProvider {
   readonly id: string;
+  readonly execution = statelessModelExecution;
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly headers: Record<string, string>;

@@ -192,6 +192,12 @@ button { color: inherit; }
 .markdown-image-unavailable { color: #817b70; }
 .markdown-message input[type="checkbox"] { margin-right: .45em; accent-color: var(--accent); }
 .thinking { color: #aaa497; font-style: italic; }
+.no-reply-message { opacity: .82; }
+.no-reply-message .avatar { filter: saturate(.55); }
+.no-reply-copy {
+  color: #918b7f; font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 10px; font-style: italic;
+}
 .message-details { margin-top: 8px; }
 .detail-toggle { border: 0; background: transparent; color: #8b867b; display: flex; align-items: center; gap: 5px; padding: 3px 0; font-size: 9px; cursor: pointer; text-transform: uppercase; letter-spacing: .08em; }
 .detail-toggle .turn { transform: rotate(180deg); }
@@ -604,6 +610,30 @@ button { color: inherit; }
 }
 .delete-confirmation .danger-button { margin-right: 0; }
 .settings-error { padding: 9px 10px; border-radius: 6px; background: #f7e7e2; color: #944533; font-size: 10px; }
+.psfn-connection-summary, .psfn-persona-notice {
+  display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px;
+  border: 1px solid #cbd9d2; border-radius: 7px; background: #f1f7f4; color: #486256;
+}
+.psfn-connection-summary > div, .psfn-persona-notice { min-width: 0; }
+.psfn-connection-summary strong, .psfn-connection-summary span,
+.psfn-connection-summary small, .psfn-persona-notice strong,
+.psfn-persona-notice span { display: block; overflow-wrap: anywhere; }
+.psfn-connection-summary span, .psfn-persona-notice span { margin-top: 3px; font-size: 10px; }
+.psfn-connection-summary small { margin-top: 3px; font-size: 9px; }
+.provider-checkbox { flex-direction: row !important; align-items: center; gap: 7px; }
+.provider-checkbox input { width: auto; }
+.psfn-participant-badge {
+  width: fit-content; margin-top: 3px; padding: 2px 5px; border-radius: 999px;
+  background: #e9f2ed; color: #506b5d; font-size: 7px !important; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.psfn-participant-badge.ambiguous { background: #f7e7e2; color: #944533; }
+.psfn-participant-badge.inflight { background: #eee9f7; color: #665486; }
+.psfn-delivery-actions {
+  display: grid; gap: 5px; margin-top: 7px; padding: 7px; border-radius: 6px;
+  border: 1px solid #ddbdb5; background: #fff8f5; color: #944533; font-size: 8px;
+}
+.psfn-delivery-actions button { min-height: 25px; font-size: 8px; }
 .settings-modal-backdrop { z-index: 60; }
 .voice-generator-modal { width: min(680px, calc(100vw - 32px)); }
 .generator-intro { margin: 0 0 14px; color: #706b61; font-size: 11px; line-height: 1.55; }

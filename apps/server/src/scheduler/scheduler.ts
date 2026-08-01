@@ -5,7 +5,10 @@ import type {
   RoomMessage
 } from "@writers-room/contracts";
 import { RoomStore } from "../storage/room-store.js";
-import type { ActivationEvaluationInput } from "./activation-evaluator.js";
+import {
+  ActivationRouteUnavailableError,
+  type ActivationEvaluationInput
+} from "./activation-evaluator.js";
 import {
   assessRoomPressure,
   effectiveFatigue,
@@ -161,7 +164,24 @@ export class ConversationScheduler {
             agent,
             eventMessage: trigger
           });
-        } catch {
+        } catch (error) {
+          if (error instanceof ActivationRouteUnavailableError && !directlyMentioned) {
+            this.dependencies.store.appendRoomEvent(roomId, {
+              type: "activation.recorded",
+              agentId: agent.id,
+              decision: {
+                shouldRespond: false,
+                urgency: 0,
+                confidence: 1,
+                targetMessageId: trigger.id,
+                intendedMove: "defer",
+                reason: error.message
+              },
+              score: 0,
+              source: "participant"
+            });
+            return undefined;
+          }
           decision = directlyMentioned
             ? {
                 shouldRespond: true,
@@ -287,7 +307,14 @@ export class ConversationScheduler {
       waves += 1;
       replies += settled.length;
       this.applyWaveFatigue(roomId, outputs);
-      triggerMessageId = outputs.at(-1)!.message.id;
+      const publishedOutputs = outputs.filter(output =>
+        output.generation.disposition !== "no-reply" &&
+        output.message.lifecycle === "active"
+      );
+      if (publishedOutputs.length === 0) {
+        return { waves, replies, stopReason: "silence" };
+      }
+      triggerMessageId = publishedOutputs.at(-1)!.message.id;
 
       // A human interruption supersedes further agent-to-agent continuation.
       // Finish the in-flight wave, then return control to the outer FIFO.

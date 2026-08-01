@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
@@ -6,10 +7,12 @@ import {
   agentRuntimeStateSchema,
   artifactSchema,
   conversationEpisodeSchema,
+  createDefaultVoiceConfiguration,
   defaultModelSelectionSchema,
   defaultRoomSettings,
   generationRecordSchema,
   providerConnectionConfigurationSchema,
+  psfnDeliveryStateSchema,
   roomMessageSchema,
   roomSchema,
   roomSettingsSchema,
@@ -23,6 +26,7 @@ import {
   type ConversationEpisode,
   type GenerationRecord,
   type ProviderConnectionConfiguration,
+  type PsfnDeliveryState,
   type Room,
   type RoomMessage,
   type RoomSettings,
@@ -69,6 +73,8 @@ interface JsonRow {
 
 const DEFAULT_MODEL_SETTING_KEY = "default_model" as const;
 const PROVIDER_CONNECTIONS_SETTING_KEY = "provider_connections" as const;
+const PSFN_TEMPLATE_DESCRIPTION =
+  "Stateful PSFN companion with remotely owned persona, memory, prompt, and faculties.";
 
 type RoomSettingsPatch = {
   [Key in keyof RoomSettings]?: RoomSettings[Key] | undefined;
@@ -345,6 +351,306 @@ export class RoomStore {
     return parsed;
   }
 
+  getPsfnDeliveryState(
+    roomId: string,
+    agentId: string
+  ): PsfnDeliveryState | undefined {
+    const row = this.database.prepare(`
+      SELECT payload_json FROM psfn_delivery_state
+      WHERE room_id = ? AND agent_id = ?
+    `).get(roomId, agentId) as JsonRow | undefined;
+    return row === undefined
+      ? undefined
+      : psfnDeliveryStateSchema.parse(JSON.parse(row.payload_json));
+  }
+
+  listPsfnDeliveryStates(roomId: string): PsfnDeliveryState[] {
+    this.getRoom(roomId);
+    return this.database.prepare(`
+      SELECT payload_json FROM psfn_delivery_state
+      WHERE room_id = ? ORDER BY agent_id
+    `).all(roomId).map(row =>
+      psfnDeliveryStateSchema.parse(JSON.parse((row as JsonRow).payload_json))
+    );
+  }
+
+  beginPsfnDelivery(input: {
+    roomId: string;
+    agentId: string;
+    remoteCompanionId: string;
+    sessionMode: "fixed" | "header";
+    sessionKey: string;
+    deliveryId: string;
+    highSequence: number;
+    envelopeDigest: string;
+    envelope?: string;
+    triggerMessageId?: string;
+    chunkIds?: string[];
+  }): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(input.roomId, input.agentId);
+    if (current?.deliveryStatus === "ambiguous") {
+      throw new Error("PSFN delivery is ambiguous and requires human resolution");
+    }
+    if (current?.deliveryStatus === "inflight") {
+      throw new Error("PSFN delivery is already in flight and cannot be overwritten");
+    }
+    if (input.highSequence < (current?.lastDeliveredSequence ?? 0)) {
+      throw new Error("PSFN delivery cursor cannot move backwards");
+    }
+    const now = new Date().toISOString();
+    const state = psfnDeliveryStateSchema.parse({
+      roomId: input.roomId,
+      agentId: input.agentId,
+      remoteCompanionId: input.remoteCompanionId,
+      sessionMode: input.sessionMode,
+      sessionVersion: current?.sessionVersion ?? 1,
+      sessionKey: input.sessionKey,
+      lastDeliveredSequence: current?.lastDeliveredSequence ?? 0,
+      inflightDeliveryId: input.deliveryId,
+      inflightHighSequence: input.highSequence,
+      inflightEnvelopeDigest: input.envelopeDigest,
+      inflightEnvelope: input.envelope,
+      inflightTriggerMessageId: input.triggerMessageId,
+      inflightChunkIds: input.chunkIds,
+      deliveryStatus: "inflight",
+      createdAt: current?.createdAt ?? now,
+      updatedAt: now
+    });
+    this.writePsfnDeliveryState(state);
+    return state;
+  }
+
+  completePsfnDelivery(
+    roomId: string,
+    agentId: string,
+    deliveryId: string
+  ): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(roomId, agentId);
+    if (!current || current.inflightDeliveryId !== deliveryId) {
+      throw new Error("PSFN inflight delivery does not match completion");
+    }
+    const state = psfnDeliveryStateSchema.parse({
+      ...current,
+      lastDeliveredSequence: Math.max(
+        current.lastDeliveredSequence,
+        current.inflightHighSequence ?? current.lastDeliveredSequence
+      ),
+      inflightDeliveryId: undefined,
+      inflightHighSequence: undefined,
+      inflightEnvelopeDigest: undefined,
+      inflightEnvelope: undefined,
+      inflightTriggerMessageId: undefined,
+      inflightChunkIds: undefined,
+      deliveryStatus: "idle",
+      updatedAt: new Date().toISOString()
+    });
+    this.writePsfnDeliveryState(state);
+    return state;
+  }
+
+  clearPsfnInflight(
+    roomId: string,
+    agentId: string,
+    deliveryId: string
+  ): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(roomId, agentId);
+    if (!current || current.inflightDeliveryId !== deliveryId) {
+      throw new Error("PSFN inflight delivery does not match failure");
+    }
+    const state = psfnDeliveryStateSchema.parse({
+      ...current,
+      inflightDeliveryId: undefined,
+      inflightHighSequence: undefined,
+      inflightEnvelopeDigest: undefined,
+      inflightEnvelope: undefined,
+      inflightTriggerMessageId: undefined,
+      inflightChunkIds: undefined,
+      deliveryStatus: "idle",
+      updatedAt: new Date().toISOString()
+    });
+    this.writePsfnDeliveryState(state);
+    return state;
+  }
+
+  markPsfnDeliveryAmbiguous(
+    roomId: string,
+    agentId: string,
+    deliveryId: string
+  ): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(roomId, agentId);
+    if (!current || current.inflightDeliveryId !== deliveryId) {
+      throw new Error("PSFN inflight delivery does not match ambiguity");
+    }
+    const state = psfnDeliveryStateSchema.parse({
+      ...current,
+      deliveryStatus: "ambiguous",
+      updatedAt: new Date().toISOString()
+    });
+    this.writePsfnDeliveryState(state);
+    return state;
+  }
+
+  restartAmbiguousPsfnDelivery(
+    roomId: string,
+    agentId: string
+  ): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(roomId, agentId);
+    if (
+      !current ||
+      current.deliveryStatus !== "ambiguous" ||
+      !current.inflightDeliveryId ||
+      !current.inflightEnvelope ||
+      !current.inflightEnvelopeDigest
+    ) {
+      throw new Error("No complete ambiguous PSFN delivery can be retried");
+    }
+    const state = psfnDeliveryStateSchema.parse({
+      ...current,
+      deliveryStatus: "inflight",
+      updatedAt: new Date().toISOString()
+    });
+    this.writePsfnDeliveryState(state);
+    return state;
+  }
+
+  beginPsfnResynchronization(input: {
+    roomId: string;
+    agentId: string;
+    remoteCompanionId: string;
+    sessionMode: "fixed" | "header";
+    sessionKey: string;
+    deliveryId: string;
+    highSequence: number;
+    envelopeDigest: string;
+    envelope: string;
+    triggerMessageId: string;
+    chunkIds: string[];
+  }): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(input.roomId, input.agentId);
+    if (
+      !current ||
+      current.deliveryStatus !== "ambiguous" ||
+      !current.inflightDeliveryId
+    ) {
+      throw new Error("No ambiguous PSFN delivery can be resynchronized");
+    }
+    const assumedDeliveredSequence = Math.max(
+      current.lastDeliveredSequence,
+      current.inflightHighSequence ?? current.lastDeliveredSequence
+    );
+    if (input.highSequence < assumedDeliveredSequence) {
+      throw new Error("PSFN resynchronization cursor cannot move backwards");
+    }
+    const state = psfnDeliveryStateSchema.parse({
+      ...current,
+      remoteCompanionId: input.remoteCompanionId,
+      sessionMode: input.sessionMode,
+      sessionKey: input.sessionKey,
+      lastDeliveredSequence: assumedDeliveredSequence,
+      inflightDeliveryId: input.deliveryId,
+      inflightHighSequence: input.highSequence,
+      inflightEnvelopeDigest: input.envelopeDigest,
+      inflightEnvelope: input.envelope,
+      inflightTriggerMessageId: input.triggerMessageId,
+      inflightChunkIds: input.chunkIds,
+      deliveryStatus: "inflight",
+      updatedAt: new Date().toISOString()
+    });
+    this.writePsfnDeliveryState(state);
+    return state;
+  }
+
+  restorePsfnAmbiguity(
+    previous: PsfnDeliveryState,
+    replacementDeliveryId: string
+  ): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(previous.roomId, previous.agentId);
+    if (
+      previous.deliveryStatus !== "ambiguous" ||
+      !previous.inflightDeliveryId ||
+      current?.deliveryStatus !== "inflight" ||
+      current.inflightDeliveryId !== replacementDeliveryId
+    ) {
+      throw new Error("PSFN resynchronization state cannot restore the prior ambiguity");
+    }
+    const restored = psfnDeliveryStateSchema.parse({
+      ...previous,
+      updatedAt: new Date().toISOString()
+    });
+    this.writePsfnDeliveryState(restored);
+    return restored;
+  }
+
+  resolvePsfnDelivery(
+    roomId: string,
+    agentId: string,
+    _resolution: "assume-delivered"
+  ): PsfnDeliveryState {
+    const current = this.getPsfnDeliveryState(roomId, agentId);
+    if (!current || current.deliveryStatus !== "ambiguous" ||
+      !current.inflightDeliveryId) {
+      throw new Error("No ambiguous PSFN delivery requires resolution");
+    }
+    return this.completePsfnDelivery(roomId, agentId, current.inflightDeliveryId);
+  }
+
+  private writePsfnDeliveryState(state: PsfnDeliveryState): void {
+    const parsed = psfnDeliveryStateSchema.parse(state);
+    this.database.prepare(`
+      INSERT INTO psfn_delivery_state(
+        room_id, agent_id, remote_companion_id, session_mode, session_key,
+        last_delivered_sequence, inflight_delivery_id, inflight_high_sequence,
+        inflight_envelope_digest, delivery_status, payload_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(room_id, agent_id) DO UPDATE SET
+        remote_companion_id = excluded.remote_companion_id,
+        session_mode = excluded.session_mode,
+        session_key = excluded.session_key,
+        last_delivered_sequence = excluded.last_delivered_sequence,
+        inflight_delivery_id = excluded.inflight_delivery_id,
+        inflight_high_sequence = excluded.inflight_high_sequence,
+        inflight_envelope_digest = excluded.inflight_envelope_digest,
+        delivery_status = excluded.delivery_status,
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+    `).run(
+      parsed.roomId,
+      parsed.agentId,
+      parsed.remoteCompanionId,
+      parsed.sessionMode,
+      parsed.sessionKey,
+      parsed.lastDeliveredSequence,
+      parsed.inflightDeliveryId ?? null,
+      parsed.inflightHighSequence ?? null,
+      parsed.inflightEnvelopeDigest ?? null,
+      parsed.deliveryStatus,
+      JSON.stringify(parsed),
+      parsed.createdAt,
+      parsed.updatedAt
+    );
+  }
+
+  private rotatePsfnHeaderSessionsForChatReset(roomId: string): void {
+    const latestSequence = (this.database.prepare(
+      "SELECT latest_sequence FROM rooms WHERE id = ?"
+    ).get(roomId) as { latest_sequence: number }).latest_sequence;
+    for (const current of this.listPsfnDeliveryStates(roomId)) {
+      if (current.sessionMode !== "header" || current.deliveryStatus !== "idle") continue;
+      const sessionVersion = current.sessionVersion + 1;
+      const readable = `writers-room:${roomId}:${current.agentId}:v${sessionVersion}`;
+      const sessionKey = readable.length <= 128
+        ? readable
+        : `writers-room:${createHash("sha256").update(readable).digest("hex")}:v${sessionVersion}`;
+      this.writePsfnDeliveryState(psfnDeliveryStateSchema.parse({
+        ...current,
+        sessionVersion,
+        sessionKey,
+        lastDeliveredSequence: Math.max(current.lastDeliveredSequence, latestSequence),
+        updatedAt: new Date().toISOString()
+      }));
+    }
+  }
+
   deleteProviderConnectionConfiguration(
     provider: ProviderConnectionConfiguration["provider"]
   ): boolean {
@@ -353,6 +659,107 @@ export class RoomStore {
     if (next.length === current.length) return false;
     this.writeProviderConnectionConfigurations(next);
     return true;
+  }
+
+  acceptPsfnProviderIdentityChange(
+    configuration: ProviderConnectionConfiguration,
+    previousCompanionId: string,
+    replacementModelId: string,
+    replacementCompanionName: string
+  ): void {
+    if (
+      configuration.provider !== "psfn" ||
+      !configuration.expectedCompanionId ||
+      configuration.expectedCompanionId === previousCompanionId
+    ) {
+      throw new Error("PSFN identity acceptance requires a different pinned identity");
+    }
+    const matching = this.database.prepare(`
+      SELECT payload_json FROM psfn_delivery_state
+      WHERE remote_companion_id = ?
+    `).all(previousCompanionId).map(row =>
+      psfnDeliveryStateSchema.parse(JSON.parse((row as JsonRow).payload_json))
+    );
+    if (matching.some(state => state.deliveryStatus !== "idle")) {
+      throw Object.assign(new Error(
+        "Resolve every active or ambiguous delivery for the previous PSFN identity before accepting a replacement"
+      ), { status: 409 });
+    }
+    const now = new Date().toISOString();
+    const localCompanionName = replacementCompanionName.trim().slice(0, 80) ||
+      "PSFN Companion";
+    const psfnAgents = (this.database.prepare(`
+      SELECT id, definition_json FROM agents
+      WHERE json_extract(definition_json, '$.provider') = 'psfn'
+    `).all() as Array<{ id: string; definition_json: string }>).map(row => ({
+      id: row.id,
+      definition: agentDefinitionSchema.parse(JSON.parse(row.definition_json))
+    }));
+    const psfnTemplates = this.listVoiceTemplates().filter(template =>
+      template.provider === "psfn"
+    );
+    const managedTemplateIds = new Set(psfnTemplates.filter(template =>
+      template.title === `PSFN — ${template.name}` &&
+      template.description === PSFN_TEMPLATE_DESCRIPTION &&
+      template.systemPrompt === "" &&
+      (template.personaPrompt ?? "") === ""
+    ).map(template => template.id));
+    const affectedRoomIds = new Set<string>();
+    for (const agent of psfnAgents) {
+      const memberships = this.database.prepare(`
+        SELECT room_id FROM room_agents WHERE agent_id = ?
+      `).all(agent.id) as Array<{ room_id: string }>;
+      for (const membership of memberships) affectedRoomIds.add(membership.room_id);
+    }
+    this.database.transaction(() => {
+      this.database.prepare(`
+        DELETE FROM psfn_delivery_state WHERE remote_companion_id = ?
+      `).run(previousCompanionId);
+      const updateAgent = this.database.prepare(`
+        UPDATE agents SET definition_json = ?, updated_at = ? WHERE id = ?
+      `);
+      for (const agent of psfnAgents) {
+        const { capabilities: _capabilities, ...withoutCapabilities } = agent.definition;
+        const updated = agentDefinitionSchema.parse({
+          ...withoutCapabilities,
+          modelId: replacementModelId,
+          ...(agent.definition.voiceTemplateId &&
+            managedTemplateIds.has(agent.definition.voiceTemplateId)
+            ? {
+                name: localCompanionName,
+                description: PSFN_TEMPLATE_DESCRIPTION
+              }
+            : {})
+        });
+        updateAgent.run(JSON.stringify(updated), now, agent.id);
+      }
+      const updateTemplate = this.database.prepare(`
+        UPDATE voice_templates SET payload_json = ?, updated_at = ? WHERE id = ?
+      `);
+      for (const template of psfnTemplates) {
+        const managed = managedTemplateIds.has(template.id);
+        const updated = voiceTemplateSchema.parse({
+          ...template,
+          modelId: replacementModelId,
+          ...(managed
+            ? {
+                title: `PSFN — ${localCompanionName}`,
+                name: localCompanionName,
+                description: PSFN_TEMPLATE_DESCRIPTION
+              }
+            : {}),
+          updatedAt: now
+        });
+        updateTemplate.run(JSON.stringify(updated), now, template.id);
+      }
+      this.setProviderConnectionConfiguration(configuration);
+    })();
+    for (const roomId of affectedRoomIds) {
+      this.appendRoomEvent(roomId, {
+        type: "room.snapshot",
+        room: this.getRoom(roomId)
+      });
+    }
   }
 
   private writeProviderConnectionConfigurations(
@@ -385,6 +792,30 @@ export class RoomStore {
       VALUES (?, ?, ?, ?)
     `).run(template.id, JSON.stringify(template), now, now);
     return template;
+  }
+
+  ensurePsfnVoiceTemplate(input: {
+    companionName: string;
+    modelId: string;
+  }): VoiceTemplate {
+    const localCompanionName = input.companionName.trim().slice(0, 80) ||
+      "PSFN Companion";
+    const existing = this.listVoiceTemplates().find(template =>
+      template.provider === "psfn" && template.modelId === input.modelId
+    );
+    if (existing) return existing;
+    return this.createVoiceTemplate({
+      ...createDefaultVoiceConfiguration(),
+      title: `PSFN — ${localCompanionName}`,
+      name: localCompanionName,
+      description: PSFN_TEMPLATE_DESCRIPTION,
+      provider: "psfn",
+      modelId: input.modelId,
+      systemPrompt: "",
+      personaPrompt: "",
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: []
+    });
   }
 
   listVoiceTemplates(): VoiceTemplate[] {
@@ -1113,6 +1544,7 @@ export class RoomStore {
     const room = this.getRoom(roomId);
     const now = new Date().toISOString();
     this.database.transaction(() => {
+      this.rotatePsfnHeaderSessionsForChatReset(roomId);
       this.database.prepare(
         "DELETE FROM scheduler_waves WHERE room_id = ?"
       ).run(roomId);
@@ -1224,6 +1656,7 @@ export class RoomStore {
         roomId,
         value => sharedNoteSchema.parse(value)
       ),
+      psfnDeliveries: this.listPsfnDeliveryStates(roomId),
       episodes: this.listConversationEpisodes(roomId),
       activations: this.database.prepare(`
         SELECT sequence, payload_json
@@ -1349,6 +1782,19 @@ export class RoomStore {
           UPDATE messages SET status = 'interrupted', payload_json = ?, updated_at = ?
           WHERE id = ?
         `).run(JSON.stringify(interrupted), now, row.id);
+      }
+
+      const psfnDeliveries = this.database.prepare(`
+        SELECT payload_json FROM psfn_delivery_state
+        WHERE delivery_status = 'inflight'
+      `).all() as JsonRow[];
+      for (const row of psfnDeliveries) {
+        const current = psfnDeliveryStateSchema.parse(JSON.parse(row.payload_json));
+        this.writePsfnDeliveryState(psfnDeliveryStateSchema.parse({
+          ...current,
+          deliveryStatus: "ambiguous",
+          updatedAt: now
+        }));
       }
 
       const artifacts = this.database.prepare(`

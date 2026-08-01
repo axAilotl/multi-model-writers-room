@@ -2,6 +2,7 @@ import {
   activationDecisionSchema,
   type ActivationDecision,
   type AgentDefinition,
+  type DefaultModelSelection,
   type NormalizedChatRequest,
   type ReasoningConfig,
   type ReasoningEffort,
@@ -14,6 +15,13 @@ export interface ActivationEvaluationInput {
   room: RoomSnapshot;
   agent: AgentDefinition;
   eventMessage: RoomMessage;
+}
+
+export class ActivationRouteUnavailableError extends Error {
+  constructor(agentName: string) {
+    super(`Auto participation requires a fallback model for ${agentName}`);
+    this.name = "ActivationRouteUnavailableError";
+  }
 }
 
 function extractJson(text: string): unknown {
@@ -29,12 +37,33 @@ export class ParticipantModelActivationEvaluator {
     Map<string, Promise<ModelDescriptor["reasoning"] | undefined>>
   >();
 
-  constructor(private readonly providers: ReadonlyMap<string, ModelProvider>) {}
+  constructor(
+    private readonly providers: ReadonlyMap<string, ModelProvider>,
+    private readonly getDefaultModel: () => DefaultModelSelection | undefined = () => undefined
+  ) {}
 
   async evaluate(input: ActivationEvaluationInput): Promise<ActivationDecision> {
-    const provider = this.providers.get(input.agent.provider);
-    if (!provider) throw new Error(`Provider is not configured: ${input.agent.provider}`);
-    const reasoning = await this.activationReasoning(provider, input.agent);
+    const participantProvider = this.providers.get(input.agent.provider);
+    if (!participantProvider) {
+      throw new Error(`Provider is not configured: ${input.agent.provider}`);
+    }
+    const participantAllowsActivation =
+      participantProvider.execution?.allowedCalls.activation !== false;
+    const fallback = participantAllowsActivation ? undefined : this.getDefaultModel();
+    const provider = fallback
+      ? this.providers.get(fallback.provider)
+      : participantAllowsActivation ? participantProvider : undefined;
+    const modelId = fallback?.modelId ?? input.agent.modelId;
+    if (!provider || provider.execution?.allowedCalls.activation === false) {
+      throw new ActivationRouteUnavailableError(input.agent.name);
+    }
+    const routeCapabilities = await provider.getCapabilities(modelId).catch(() => undefined);
+    const reasoning = await this.activationReasoning(
+      provider,
+      modelId,
+      input.agent,
+      routeCapabilities?.reasoningInputControl === true
+    );
     const eventSpeaker = input.room.agents.find(agent =>
       agent.id === input.eventMessage.authorId
     )?.name ?? (input.eventMessage.authorType === "human"
@@ -52,7 +81,7 @@ export class ParticipantModelActivationEvaluator {
       return `[${speaker}] ${message.content.slice(0, 500)}`;
     }).join("\n");
     const request: NormalizedChatRequest = {
-      modelId: input.agent.modelId,
+      modelId,
       messages: [
         {
           role: "system",
@@ -82,7 +111,7 @@ export class ParticipantModelActivationEvaluator {
       tools: [],
       sessionId: `${input.room.room.id}:${input.agent.id}:activation`,
       signal: AbortSignal.timeout(60_000),
-      ...(input.agent.capabilities?.structuredOutput
+      ...(routeCapabilities?.structuredOutput
         ? {
           structuredOutput: {
             name: "activation_decision",
@@ -118,9 +147,11 @@ export class ParticipantModelActivationEvaluator {
 
   private async activationReasoning(
     provider: ModelProvider,
-    agent: AgentDefinition
+    modelId: string,
+    agent: AgentDefinition,
+    reasoningInputControl: boolean
   ): Promise<ReasoningConfig> {
-    if (!agent.capabilities?.reasoningInputControl) {
+    if (!reasoningInputControl) {
       return { enabled: false, displayMode: "hidden" };
     }
     let providerSupport = this.reasoningSupport.get(provider);
@@ -128,12 +159,12 @@ export class ParticipantModelActivationEvaluator {
       providerSupport = new Map();
       this.reasoningSupport.set(provider, providerSupport);
     }
-    let lookup = providerSupport.get(agent.modelId);
+    let lookup = providerSupport.get(modelId);
     if (!lookup) {
       lookup = provider.listModels()
-        .then(models => models.find(model => model.id === agent.modelId)?.reasoning)
+        .then(models => models.find(model => model.id === modelId)?.reasoning)
         .catch(() => undefined);
-      providerSupport.set(agent.modelId, lookup);
+      providerSupport.set(modelId, lookup);
     }
     const support = await lookup;
     const effortOrder: ReasoningEffort[] = [

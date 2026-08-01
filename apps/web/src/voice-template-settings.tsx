@@ -16,6 +16,8 @@ import {
   voiceTemplateInputSchema,
   type DefaultModelSelection,
   type ModelDescriptor,
+  type ProviderConnectionStatus,
+  type ProviderKind,
   type VoiceTemplate,
   type VoiceTemplateLibraryItem,
   type VoiceTemplateInput
@@ -44,6 +46,8 @@ export function VoiceTemplateEditor() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string>();
   const [defaultModel, setDefaultModel] = useState<DefaultModelSelection>();
+  const [availableProviders, setAvailableProviders] = useState<ProviderKind[]>([]);
+  const [providerConnections, setProviderConnections] = useState<ProviderConnectionStatus[]>([]);
   const [showGenerator, setShowGenerator] = useState(false);
   const [reasoningSupport, setReasoningSupport] = useState<ReasoningSupport>();
   const [modelContextLength, setModelContextLength] = useState<number>();
@@ -59,9 +63,14 @@ export function VoiceTemplateEditor() {
     let active = true;
     void (async () => {
       try {
-        const nextTemplates = await api.listVoiceTemplates();
+        const [nextTemplates, connections] = await Promise.all([
+          api.listVoiceTemplates(),
+          api.listProviderConnections()
+        ]);
         if (!active) return;
         setTemplates(nextTemplates);
+        setAvailableProviders(connections.map(connection => connection.provider));
+        setProviderConnections(connections);
         const savedDefault = await api.getDefaultModel();
         if (!active) return;
         setDefaultModel(savedDefault);
@@ -181,6 +190,22 @@ export function VoiceTemplateEditor() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     setError(undefined);
+    const missing = [
+      !draft.title.trim() ? "Template title" : undefined,
+      !draft.name.trim() ? "Voice name" : undefined,
+      !draft.modelId.trim() ? "Model" : undefined,
+      draft.provider !== "psfn" && !draft.systemPrompt.trim()
+        ? "System prompt"
+        : undefined
+    ].filter((field): field is string => field !== undefined);
+    if (missing.length > 0) {
+      const fields = missing.length === 1
+        ? missing[0]
+        : `${missing.slice(0, -1).join(", ")}, and ${missing.at(-1)}`;
+      setSaved(false);
+      setError(`Cannot save template: ${fields} ${missing.length === 1 ? "is" : "are"} required.`);
+      return;
+    }
     const result = voiceTemplateInputSchema.safeParse(draft);
     if (!result.success) {
       setSaved(false);
@@ -289,17 +314,28 @@ export function VoiceTemplateEditor() {
                 name="provider"
                 value={draft.provider}
                 onChange={event => {
-                  update(
-                    "provider",
-                    event.target.value as VoiceTemplateInput["provider"]
-                  );
-                  update("modelId", "");
+                  const provider = event.target.value as VoiceTemplateInput["provider"];
+                  const remoteName = providerConnections.find(connection =>
+                    connection.provider === provider
+                  )?.remoteCompanionName;
+                  setDraft(current => ({
+                    ...current,
+                    provider,
+                    modelId: "",
+                    ...(provider === "psfn" ? {
+                      ...(!current.name.trim() && remoteName ? { name: remoteName } : {}),
+                      systemPrompt: "",
+                      personaPrompt: "",
+                      reasoning: { enabled: false, displayMode: "hidden" },
+                      tools: []
+                    } : {})
+                  }));
                   setReasoningSupport(undefined);
                   setModelContextLength(undefined);
                 }}
               >
-                {Object.entries(providerLabels).map(([value, label]) => (
-                  <option value={value} key={value}>{label}</option>
+                {availableProviders.map(provider => (
+                  <option value={provider} key={provider}>{providerLabels[provider]}</option>
                 ))}
               </select>
             </label>
@@ -324,24 +360,37 @@ export function VoiceTemplateEditor() {
               />
             </label>
           </div>
-          <label>System prompt
-            <textarea
-              name="systemPrompt"
-              required
-              rows={5}
-              value={draft.systemPrompt}
-              onChange={event => update("systemPrompt", event.target.value)}
-            />
-          </label>
-          <label>Persona prompt
-            <textarea
-              name="personaPrompt"
-              rows={3}
-              value={draft.personaPrompt ?? ""}
-              onChange={event => update("personaPrompt", event.target.value)}
-              placeholder="Short stylistic voice: direct, skeptical, concise."
-            />
-          </label>
+          {draft.provider === "psfn" ? (
+            <div className="psfn-persona-notice">
+              <strong>Persona and memory live in PSFN</strong>
+              <span>This template binds the room voice to the verified remote companion. Writers’ Room does not replace its system prompt, faculties, persona, or persistent memory.</span>
+              {!defaultModel && (
+                <span>Auto participation requires a stateless fallback model. Direct @mentions and manual Invite remain available.</span>
+              )}
+            </div>
+          ) : (
+            <>
+              <label>System prompt
+                <textarea
+                  name="systemPrompt"
+                  required
+                  rows={5}
+                  value={draft.systemPrompt}
+                  onChange={event => update("systemPrompt", event.target.value)}
+                />
+              </label>
+              <label>Persona prompt
+                <textarea
+                  name="personaPrompt"
+                  rows={3}
+                  value={draft.personaPrompt ?? ""}
+                  onChange={event => update("personaPrompt", event.target.value)}
+                  placeholder="Short stylistic voice: direct, skeptical, concise."
+                />
+              </label>
+            </>
+          )}
+          {draft.provider !== "psfn" && <>
           <fieldset className="template-fieldset voice-reference-library">
             <legend>Reference library</legend>
             <p>
@@ -615,6 +664,7 @@ export function VoiceTemplateEditor() {
               </label>
             </div>
           </fieldset>
+          </>}
           {error && <div className="settings-error" role="alert">{error}</div>}
           <footer>
             {selectedId && !confirmingDelete && (

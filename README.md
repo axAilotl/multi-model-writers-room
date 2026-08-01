@@ -57,7 +57,7 @@ Requirements:
 
 - Node.js 22–26; Node 24 LTS is the primary target
 - Linux for the currently tested local release
-- One of: an OpenRouter key, a running Ollama server, or an OpenAI-compatible endpoint
+- One of: an OpenRouter key, a running Ollama server, an OpenAI-compatible endpoint, or an explicitly enabled PSFN companion endpoint
 
 Start the development servers:
 
@@ -120,6 +120,13 @@ startup and are restored when a saved override is removed.
 | `OLLAMA_API_KEY` | Optional key for an authenticated Ollama proxy | unset |
 | `OPENAI_COMPATIBLE_BASE_URL` | Generic OpenAI-compatible endpoint | unset |
 | `OPENAI_COMPATIBLE_API_KEY` | Optional key for the generic endpoint | unset |
+| `PSFN_PROVIDER_ENABLED` | Exposes the optimized stateful PSFN provider | `false` |
+| `PSFN_BASE_URL` | PSFN origin or `/v1` endpoint | unset |
+| `PSFN_API_KEY` | Optional PSFN bearer credential | unset |
+| `PSFN_SESSION_MODE` | `header` for per-room continuity or `fixed` for one shared remote session | `header` |
+| `PSFN_EXPECTED_COMPANION_ID` | Optional pinned remote identity; first successful test pins it automatically | unset |
+| `PSFN_CONTEXT_LENGTH` | Bounded adapter input context | `32768` |
+| `PSFN_ALLOW_INSECURE_HTTP` | Allow HTTP only for private/loopback endpoints | `false` |
 | `WRITERS_ROOM_DATA_DIR` | SQLite, blobs, model cache, and generated local state | `./data` |
 | `WRITERS_ROOM_HOST` | API bind address | `127.0.0.1` |
 | `WRITERS_ROOM_PORT` | API port | `8787` |
@@ -133,6 +140,32 @@ Markdown, text, and PDF references can be uploaded, inspected, and removed
 there. Uploading through a linked participant's Library control adds to the same
 template library; existing room instances receive it and future instances
 inherit it automatically. Materialized evidence remains private to that voice.
+
+### Stateful PSFN provider
+
+PSFN is a separate provider kind, not a generic OpenAI-compatible alias. Enable
+it explicitly with `PSFN_PROVIDER_ENABLED=true`, then configure and test it in
+**Settings → Providers & models**. The test performs the PSFN identity and model
+handshake and pins the companion identity so an unexpected remote change fails
+closed. A successful save or connection test also creates one deduplicated
+`PSFN — <remote name>` voice template, ready to add to rooms.
+
+PSFN owns its persona, system prompt, faculties, memory, and internal reasoning.
+Writers’ Room uses ordinary fallback models for activation and housekeeping,
+then sends PSFN only a bounded event envelope containing new completed public
+messages and relevant shared-table excerpts. It never sends local persona
+prompts, failed drafts, tool events, repository contents, or another voice’s
+private library through this path. Intentional no-reply is recorded without an
+empty chat bubble.
+
+Header session mode creates stable per-room continuity using `X-Session-ID`.
+Fixed mode enters one shared durable PSFN conversation across rooms and requires
+explicit confirmation when reused. A local chat reset retains participants and
+artifacts but does not delete PSFN’s remote history or memory. If a connection
+drops after a turn may have been admitted, the delivery is marked ambiguous and
+must be resolved in the participant panel; the app does not silently risk a
+duplicate. See [the adapter specification](docs/psfn-adapter-spec.md) for the
+protocol and failure semantics.
 
 ### Model-aware context and rolling history
 

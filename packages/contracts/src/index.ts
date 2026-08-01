@@ -3,7 +3,8 @@ import { z } from "zod";
 export const providerKinds = [
   "openrouter",
   "ollama",
-  "openai-compatible"
+  "openai-compatible",
+  "psfn"
 ] as const;
 export const providerKindSchema = z.enum(providerKinds);
 export type ProviderKind = z.infer<typeof providerKindSchema>;
@@ -11,7 +12,11 @@ export type ProviderKind = z.infer<typeof providerKindSchema>;
 export const providerConnectionConfigurationSchema = z.object({
   provider: providerKindSchema,
   baseUrl: z.string().trim().min(1).max(2_048).optional(),
-  apiKey: z.string().min(1).max(32_768).optional()
+  apiKey: z.string().min(1).max(32_768).optional(),
+  sessionMode: z.enum(["fixed", "header"]).optional(),
+  expectedCompanionId: z.string().trim().min(1).max(200).optional(),
+  contextLength: z.number().int().min(4_096).max(1_000_000).optional(),
+  allowInsecureHttp: z.boolean().optional()
 });
 export type ProviderConnectionConfiguration = z.infer<
   typeof providerConnectionConfigurationSchema
@@ -19,7 +24,12 @@ export type ProviderConnectionConfiguration = z.infer<
 
 export const providerConnectionUpdateSchema = z.object({
   baseUrl: z.string().trim().min(1).max(2_048).optional(),
-  apiKey: z.string().min(1).max(32_768).optional()
+  apiKey: z.string().min(1).max(32_768).optional(),
+  sessionMode: z.enum(["fixed", "header"]).optional(),
+  expectedCompanionId: z.string().trim().min(1).max(200).optional(),
+  contextLength: z.number().int().min(4_096).max(1_000_000).optional(),
+  allowInsecureHttp: z.boolean().optional(),
+  acceptIdentityChange: z.boolean().optional()
 });
 export type ProviderConnectionUpdate = z.infer<
   typeof providerConnectionUpdateSchema
@@ -31,7 +41,22 @@ export const providerConnectionStatusSchema = z.object({
   baseUrl: z.string().optional(),
   hasApiKey: z.boolean(),
   endpointSource: z.enum(["settings", "environment", "built-in", "runtime", "none"]),
-  credentialSource: z.enum(["settings", "environment", "runtime", "none"])
+  credentialSource: z.enum(["settings", "environment", "runtime", "none"]),
+  sessionMode: z.enum(["fixed", "header"]).optional(),
+  expectedCompanionId: z.string().optional(),
+  remoteCompanionId: z.string().optional(),
+  remoteCompanionName: z.string().optional(),
+  contextLength: z.number().int().positive().optional(),
+  connectionState: z.enum([
+    "unconfigured",
+    "untested",
+    "connected",
+    "auth-rejected",
+    "door-unavailable",
+    "incompatible",
+    "identity-drift",
+    "unavailable"
+  ]).optional()
 });
 export type ProviderConnectionStatus = z.infer<
   typeof providerConnectionStatusSchema
@@ -198,10 +223,10 @@ export function deriveContextPolicy(input: {
   };
 }
 
-const systemPromptSchema = z.string().trim().min(1);
+const systemPromptSchema = z.string().trim();
 const personaPromptSchema = z.string().trim();
 
-export const agentDefinitionSchema = z.object({
+const agentDefinitionBaseSchema = z.object({
   id: z.string().min(1),
   voiceTemplateId: z.string().min(1).optional(),
   name: z.string().trim().min(1).max(80),
@@ -218,13 +243,31 @@ export const agentDefinitionSchema = z.object({
   contextBudget: contextBudgetSchema,
   capabilities: modelCapabilitiesSchema.optional()
 });
+
+function requireLocalSystemPrompt(
+  value: { provider: ProviderKind; systemPrompt: string },
+  context: z.RefinementCtx
+): void {
+  if (value.provider !== "psfn" && value.systemPrompt.length === 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["systemPrompt"],
+      message: "System prompt is required for stateless model providers"
+    });
+  }
+}
+
+export const agentDefinitionSchema = agentDefinitionBaseSchema.superRefine(
+  requireLocalSystemPrompt
+);
 export type AgentDefinition = z.infer<typeof agentDefinitionSchema>;
 
-export const voiceTemplateInputSchema = agentDefinitionSchema
+export const voiceTemplateInputSchema = agentDefinitionBaseSchema
   .omit({ id: true, voiceTemplateId: true, capabilities: true })
   .extend({
     title: z.string().trim().min(1).max(120)
-  });
+  })
+  .superRefine(requireLocalSystemPrompt);
 export type VoiceTemplateInput = z.infer<typeof voiceTemplateInputSchema>;
 
 export function createDefaultVoiceConfiguration(): Pick<
@@ -494,6 +537,9 @@ export const agentRuntimeStateSchema = z.object({
 });
 export type AgentRuntimeState = z.infer<typeof agentRuntimeStateSchema>;
 
+export const generationDispositionSchema = z.enum(["published", "no-reply"]);
+export type GenerationDisposition = z.infer<typeof generationDispositionSchema>;
+
 export const generationRecordSchema = z.object({
   id: z.string(),
   roomId: z.string(),
@@ -504,6 +550,7 @@ export const generationRecordSchema = z.object({
   actualModelId: z.string().optional(),
   actualProvider: z.string().optional(),
   status: z.enum(["queued", "streaming", "complete", "interrupted", "failed"]),
+  disposition: generationDispositionSchema.optional(),
   finalText: z.string().default(""),
   reasoningText: z.string().optional(),
   reasoningSummary: z.string().optional(),
@@ -559,6 +606,59 @@ export interface NormalizedChatRequest {
   structuredOutput?: Record<string, unknown>;
 }
 
+export interface ProviderExecutionProfile {
+  semantics: "stateless-model" | "stateful-companion";
+  personaAuthority: "local" | "remote";
+  allowedCalls: {
+    participantGeneration: boolean;
+    activation: boolean;
+    deliberation: boolean;
+    housekeeping: boolean;
+    toolLoop: boolean;
+  };
+}
+
+export interface StatefulParticipantTurnRequest {
+  generationId: string;
+  eventKind?: "delta" | "resynchronization";
+  room: {
+    id: string;
+    title: string;
+    conversationStyle: RoomSettings["conversationStyle"];
+    responseLength: RoomSettings["responseLength"];
+  };
+  agent: {
+    id: string;
+    name: string;
+    description: string;
+    modelId: string;
+  };
+  participants: Array<{
+    id: string;
+    name: string;
+    description: string;
+  }>;
+  triggerMessageId: string;
+  pendingMessages: Array<{
+    id: string;
+    sequence: number;
+    authorType: "human" | "agent";
+    authorName: string;
+    content: string;
+    replyToMessageId?: string;
+    citedChunkIds: string[];
+  }>;
+  evidence: Array<{
+    chunkId: string;
+    artifactTitle: string;
+    excerpt: string;
+  }>;
+  sessionId: string;
+  responseStyle: "concise" | "expressive";
+  preRenderedEnvelope?: string;
+  signal: AbortSignal;
+}
+
 export type NormalizedGenerationEvent =
   | { type: "text-delta"; text: string }
   | { type: "reasoning-delta"; text: string }
@@ -566,7 +666,27 @@ export type NormalizedGenerationEvent =
   | { type: "tool-call"; id: string; name: string; arguments: string }
   | { type: "usage"; inputTokens?: number; outputTokens?: number; reasoningTokens?: number; costUsd?: number }
   | { type: "routing"; modelId?: string; provider?: string }
-  | { type: "done"; finishReason?: string };
+  | { type: "done"; finishReason?: string; disposition?: GenerationDisposition };
+
+export const psfnDeliveryStateSchema = z.object({
+  roomId: z.string().min(1),
+  agentId: z.string().min(1),
+  remoteCompanionId: z.string().min(1),
+  sessionMode: z.enum(["fixed", "header"]),
+  sessionVersion: z.number().int().positive().default(1),
+  sessionKey: z.string().min(1).max(128),
+  lastDeliveredSequence: z.number().int().nonnegative(),
+  inflightDeliveryId: z.string().optional(),
+  inflightHighSequence: z.number().int().nonnegative().optional(),
+  inflightEnvelopeDigest: z.string().length(64).optional(),
+  inflightEnvelope: z.string().max(1_000_000).optional(),
+  inflightTriggerMessageId: z.string().min(1).optional(),
+  inflightChunkIds: z.array(z.string()).optional(),
+  deliveryStatus: z.enum(["idle", "inflight", "ambiguous"]),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type PsfnDeliveryState = z.infer<typeof psfnDeliveryStateSchema>;
 
 export const artifactSchema = z.object({
   id: z.string(),
@@ -660,6 +780,7 @@ export interface RoomSnapshot {
   runtime: AgentRuntimeState[];
   artifacts: WorkspaceArtifact[];
   notes: SharedNote[];
+  psfnDeliveries?: PsfnDeliveryState[];
   episodes?: ConversationEpisode[];
   activations: Array<{
     sequence: number;

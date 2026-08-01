@@ -15,6 +15,7 @@ import type {
   WorkspaceArtifact
 } from "@writers-room/contracts";
 import type { ModelProvider } from "../providers/model-provider.js";
+import { PsfnProvider, PsfnProviderError } from "../providers/psfn.js";
 import { ProviderConnectionManager } from "../providers/provider-connections.js";
 import { RoomEngine } from "../room/room-engine.js";
 import { ParticipantModelActivationEvaluator } from "../scheduler/activation-evaluator.js";
@@ -149,7 +150,10 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
   const engine = new RoomEngine(options.store, options.providers, options.tools);
   const scheduler = new ConversationScheduler({
     store: options.store,
-    evaluator: new ParticipantModelActivationEvaluator(options.providers),
+    evaluator: new ParticipantModelActivationEvaluator(
+      options.providers,
+      () => options.store.getDefaultModel()
+    ),
     generator: engine
   });
   const upload = multer({
@@ -297,14 +301,14 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
 
   application.put(
     "/api/v1/settings/providers/:providerId",
-    (request, response) => {
+    asyncRoute(async (request, response) => {
       response.json({
-        provider: providerConnections.configure(
+        provider: await providerConnections.configure(
           String(request.params.providerId),
           request.body
         )
       });
-    }
+    })
   );
 
   application.delete(
@@ -316,16 +320,38 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     }
   );
 
+  application.post(
+    "/api/v1/settings/providers/:providerId/test",
+    asyncRoute(async (request, response) => {
+      const input = z.object({
+        acceptIdentityChange: z.boolean().optional()
+      }).parse(request.body ?? {});
+      response.json({
+        provider: await providerConnections.test(
+          String(request.params.providerId),
+          input.acceptIdentityChange === true
+        )
+      });
+    })
+  );
+
   application.get(
     "/api/v1/providers/:providerId/models",
     asyncRoute(async (request, response) => {
       const providerId = String(request.params.providerId);
-      const provider = options.providers.get(providerId);
+      let provider = options.providers.get(providerId);
       if (!provider) {
         response.status(409).json({
           error: `Provider is not configured: ${providerId}. Add its endpoint and credentials under Settings → Providers & models.`
         });
         return;
+      }
+      if (provider instanceof PsfnProvider) {
+        await providerConnections.test("psfn");
+        provider = options.providers.get("psfn");
+        if (!(provider instanceof PsfnProvider)) {
+          throw new Error("PSFN connection disappeared after identity verification");
+        }
       }
       const models = await provider.listModels();
       response.json({
@@ -349,6 +375,12 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       if (!provider) {
         response.status(400).json({
           error: `Provider is not configured: ${selection.provider}`
+        });
+        return;
+      }
+      if (provider.execution?.allowedCalls.housekeeping === false) {
+        response.status(400).json({
+          error: `${selection.provider} is a stateful companion and cannot be the fallback model`
         });
         return;
       }
@@ -585,9 +617,26 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     asyncRoute(async (request, response) => {
       const roomId = String(request.params.roomId);
       const current = options.store.getRoom(roomId);
+      if (options.store.listPsfnDeliveryStates(roomId).some(delivery =>
+        delivery.deliveryStatus === "ambiguous"
+      )) {
+        response.status(409).json({
+          error: "Resolve the ambiguous PSFN delivery before resetting local chat"
+        });
+        return;
+      }
       const resumeAfterReset = current.status === "running";
       if (resumeAfterReset) options.store.updateRoom(roomId, { status: "paused" });
       await engine.interruptRoomAndWait(roomId);
+      if (options.store.listPsfnDeliveryStates(roomId).some(delivery =>
+        delivery.deliveryStatus === "ambiguous"
+      )) {
+        if (resumeAfterReset) options.store.updateRoom(roomId, { status: "running" });
+        response.status(409).json({
+          error: "The interrupted PSFN turn has an ambiguous delivery. Resolve it before resetting local chat."
+        });
+        return;
+      }
       options.store.resetChat(roomId);
       const room = resumeAfterReset
         ? options.store.updateRoom(roomId, { status: "running" })
@@ -621,10 +670,31 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
             contextBudget: linkedTemplate.contextBudget
           })
         : submitted;
-      const provider = options.providers.get(canonical.provider);
+      let provider = options.providers.get(canonical.provider);
       if (!provider) {
         response.status(400).json({
           error: `Provider is not configured: ${canonical.provider}`
+        });
+        return;
+      }
+      if (provider instanceof PsfnProvider) {
+        await providerConnections.test("psfn");
+        provider = options.providers.get("psfn");
+        if (!(provider instanceof PsfnProvider)) {
+          throw new Error("PSFN connection disappeared after identity verification");
+        }
+      }
+      if (
+        provider instanceof PsfnProvider &&
+        provider.configuredSessionMode === "fixed" &&
+        request.body?.confirmSharedPsfnSession !== true &&
+        options.store.listRooms().some(room =>
+          room.id !== String(request.params.roomId) &&
+          options.store.listAgents(room.id).some(agent => agent.provider === "psfn")
+        )
+      ) {
+        response.status(409).json({
+          error: "This fixed PSFN connection is already attached to another room. Explicit shared-session confirmation is required."
         });
         return;
       }
@@ -693,25 +763,42 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
 
   application.delete(
     "/api/v1/rooms/:roomId/agents/:agentId",
-    (request, response) => {
+    asyncRoute(async (request, response) => {
       const roomId = String(request.params.roomId);
       const agentId = String(request.params.agentId);
       options.store.getRoomAgent(roomId, agentId);
-      engine.interruptAgent(roomId, agentId);
-      if (options.workspace) {
-        for (const artifact of options.workspace.listArtifacts(roomId)) {
-          if (artifact.ownerAgentId === agentId) {
-            options.workspace.deleteArtifact(roomId, artifact.id, {
-              allowTemplateManaged: true
-            });
+      const priorRuntime = options.store.getRuntime(roomId, agentId);
+      if (!priorRuntime.muted) {
+        options.store.updateRuntime(roomId, agentId, {
+          ...priorRuntime,
+          muted: true
+        });
+      }
+      try {
+        await engine.interruptAgentAndWait(roomId, agentId);
+        if (options.workspace) {
+          for (const artifact of options.workspace.listArtifacts(roomId)) {
+            if (artifact.ownerAgentId === agentId) {
+              options.workspace.deleteArtifact(roomId, artifact.id, {
+                allowTemplateManaged: true
+              });
+            }
           }
         }
+        const agent = options.store.removeAgent(roomId, agentId);
+        const room = options.store.getRoom(roomId);
+        options.store.appendRoomEvent(room.id, { type: "room.snapshot", room });
+        response.json({ removed: true, agent });
+      } catch (error) {
+        try {
+          options.store.getRoomAgent(roomId, agentId);
+          options.store.updateRuntime(roomId, agentId, priorRuntime);
+        } catch {
+          // Removal completed; there is no runtime left to restore.
+        }
+        throw error;
       }
-      const agent = options.store.removeAgent(roomId, agentId);
-      const room = options.store.getRoom(roomId);
-      options.store.appendRoomEvent(room.id, { type: "room.snapshot", room });
-      response.json({ removed: true, agent });
-    }
+    })
   );
 
   application.post("/api/v1/rooms/:roomId/messages", (request, response) => {
@@ -778,6 +865,41 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       .parse(request.query.after);
     response.json({ events: options.store.getEvents(request.params.roomId!, after) });
   });
+
+  application.post(
+    "/api/v1/rooms/:roomId/agents/:agentId/psfn-delivery/resolve",
+    asyncRoute(async (request, response) => {
+      const input = z.object({
+        resolution: z.enum([
+          "assume-delivered",
+          "retry-possible-duplicate",
+          "send-resynchronization-summary"
+        ])
+      }).parse(request.body);
+      if (input.resolution === "retry-possible-duplicate") {
+        const result = await engine.retryPsfnDelivery({
+          roomId: String(request.params.roomId),
+          agentId: String(request.params.agentId)
+        });
+        response.status(201).json(result);
+        return;
+      }
+      if (input.resolution === "send-resynchronization-summary") {
+        const result = await engine.resynchronizePsfnDelivery({
+          roomId: String(request.params.roomId),
+          agentId: String(request.params.agentId)
+        });
+        response.status(201).json(result);
+        return;
+      }
+      const delivery = options.store.resolvePsfnDelivery(
+        String(request.params.roomId),
+        String(request.params.agentId),
+        input.resolution
+      );
+      response.json({ delivery });
+    })
+  );
 
   application.patch(
     "/api/v1/rooms/:roomId/agents/:agentId/runtime",
@@ -1000,6 +1122,18 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       response.status(413).json({ error: message });
       return;
     }
+    if (error instanceof PsfnProviderError) {
+      const status = {
+        "auth-rejected": 401,
+        "identity-drift": 409,
+        incompatible: 422,
+        "door-unavailable": 503,
+        unavailable: 502,
+        ambiguous: 502
+      }[error.category];
+      response.status(status).json({ error: message });
+      return;
+    }
     const explicitStatus = typeof error === "object" && error !== null &&
       "status" in error && typeof error.status === "number" &&
       error.status >= 400 && error.status < 500
@@ -1013,7 +1147,7 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     }
     const status = /not found/i.test(message)
       ? 404
-      : /paused|already|muted|does not belong|configuration changed/i.test(message)
+      : /paused|already|muted|does not belong|configuration changed|requires human resolution/i.test(message)
         ? 409
         : 500;
     response.status(status).json({ error: message });

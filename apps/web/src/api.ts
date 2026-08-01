@@ -101,6 +101,19 @@ export const api = {
     )).provider;
   },
 
+  async testProviderConnection(
+    provider: AgentDefinition["provider"],
+    acceptIdentityChange = false
+  ): Promise<ProviderConnectionStatus> {
+    return (await requestJson<{ provider: ProviderConnectionStatus }>(
+      `/api/v1/settings/providers/${encodeURIComponent(provider)}/test`,
+      {
+        method: "POST",
+        body: JSON.stringify({ acceptIdentityChange })
+      }
+    )).provider;
+  },
+
   async getDefaultModel(): Promise<DefaultModelSelection | undefined> {
     return (await requestJson<{ defaultModel: DefaultModelSelection | null }>(
       "/api/v1/settings/default-model"
@@ -232,10 +245,17 @@ export const api = {
     })).room;
   },
 
-  addAgent(roomId: string, agent: AgentDefinition): Promise<{ agent: AgentDefinition }> {
+  addAgent(
+    roomId: string,
+    agent: AgentDefinition,
+    confirmSharedPsfnSession = false
+  ): Promise<{ agent: AgentDefinition }> {
     return requestJson(`/api/v1/rooms/${roomId}/agents`, {
       method: "POST",
-      body: JSON.stringify(agent)
+      body: JSON.stringify({
+        ...agent,
+        ...(confirmSharedPsfnSession ? { confirmSharedPsfnSession: true } : {})
+      })
     });
   },
 
@@ -281,6 +301,20 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ muted })
     });
+  },
+
+  resolvePsfnDelivery(
+    roomId: string,
+    agentId: string,
+    resolution:
+      | "assume-delivered"
+      | "retry-possible-duplicate"
+      | "send-resynchronization-summary"
+  ): Promise<unknown> {
+    return requestJson(
+      `/api/v1/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(agentId)}/psfn-delivery/resolve`,
+      { method: "POST", body: JSON.stringify({ resolution }) }
+    );
   },
 
   async upload(

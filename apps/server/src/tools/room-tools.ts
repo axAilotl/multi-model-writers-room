@@ -1,5 +1,6 @@
 import type {
   NormalizedToolDefinition,
+  StatefulParticipantTurnRequest,
   WorkspaceArtifact,
   WorkspaceSearchResult
 } from "@writers-room/contracts";
@@ -15,12 +16,20 @@ import type { ModelProvider } from "../providers/model-provider.js";
 export interface ToolExecutionResult {
   content: string;
   citedChunkIds: string[];
+  evidence?: StatefulParticipantTurnRequest["evidence"];
 }
 
 export interface ToolExecutor {
   definitions(names: readonly string[]): NormalizedToolDefinition[];
   workspaceManifest(roomId: string, agentId: string): string;
   collectPersonaEvidence(input: {
+    roomId: string;
+    agentId: string;
+    query: string;
+    limit?: number;
+    signal?: AbortSignal;
+  }): Promise<ToolExecutionResult>;
+  collectParticipantEvidence(input: {
     roomId: string;
     agentId: string;
     query: string;
@@ -176,6 +185,44 @@ export class RoomToolExecutor implements ToolExecutor {
     return {
       content: renderResearchEvidence(results),
       citedChunkIds: results.map(result => result.chunk.id)
+    };
+  }
+
+  async collectParticipantEvidence(input: {
+    roomId: string;
+    agentId: string;
+    query: string;
+    limit?: number;
+    signal?: AbortSignal;
+  }): Promise<ToolExecutionResult> {
+    const operation = this.workspace.search({
+      roomId: input.roomId,
+      query: input.query,
+      sourceTypes: ["upload", "paste", "generated", "url"],
+      visibleToAgentId: input.agentId,
+      limit: input.limit ?? 6,
+      ...(input.signal === undefined ? {} : { signal: input.signal })
+    });
+    const results = input.signal === undefined
+      ? await operation
+      : await withAbort(operation, input.signal);
+    const evidence = results.reduce<StatefulParticipantTurnRequest["evidence"]>(
+      (items, result) => {
+        const used = items.reduce((sum, item) => sum + item.excerpt.length, 0);
+        if (used >= 12_000) return items;
+        items.push({
+          chunkId: result.chunk.id,
+          artifactTitle: result.artifact.title ?? result.artifact.filename,
+          excerpt: result.chunk.text.slice(0, Math.min(3_000, 12_000 - used))
+        });
+        return items;
+      },
+      []
+    );
+    return {
+      content: renderResearchEvidence(results),
+      citedChunkIds: evidence.map(item => item.chunkId),
+      evidence
     };
   }
 

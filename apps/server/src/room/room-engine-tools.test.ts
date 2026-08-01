@@ -778,4 +778,76 @@ describe("room generation tool seam", () => {
     ]);
     store.close();
   });
+
+  it("collects PSFN evidence from shared table items without leaking repository or private libraries", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-psfn-evidence-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Evidence room" });
+    store.addAgent(room.id, {
+      id: "remote",
+      name: "Remote",
+      description: "PSFN participant",
+      provider: "psfn",
+      modelId: "remote",
+      systemPrompt: "",
+      temperature: 0,
+      maxOutputTokens: 256,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 4_000,
+        hardLimitTokens: 8_000,
+        recentTranscriptTokens: 2_000,
+        retrievedContextTokens: 1_000,
+        notebookTokens: 0
+      }
+    });
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: {
+        dimensions: 2,
+        embedDocuments: async texts => texts.map(() => new Float32Array([1, 0])),
+        embedQuery: async () => new Float32Array([1, 0])
+      },
+      housekeeping: { summarize: async () => ({ summary: "Grounding source." }) }
+    });
+    await workspace.ingest({
+      roomId: room.id,
+      filename: "shared.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("LANTERN shared table evidence"),
+      sourceType: "upload"
+    });
+    await workspace.ingest({
+      roomId: room.id,
+      filename: "repository.ts",
+      mediaType: "text/typescript",
+      bytes: Buffer.from("LANTERN repository secret"),
+      sourceType: "repository"
+    });
+    await workspace.ingest({
+      roomId: room.id,
+      filename: "private.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("LANTERN private persona secret"),
+      sourceType: "persona-memory",
+      ownerAgentId: "remote"
+    });
+    const result = await new RoomToolExecutor(store, workspace)
+      .collectParticipantEvidence({
+        roomId: room.id,
+        agentId: "remote",
+        query: "LANTERN"
+      });
+
+    expect(result.evidence).toMatchObject([{
+      artifactTitle: "shared.md",
+      excerpt: expect.stringContaining("shared table evidence")
+    }]);
+    expect(result.content).not.toContain("repository secret");
+    expect(result.content).not.toContain("private persona secret");
+    store.close();
+  });
 });

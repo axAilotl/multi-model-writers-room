@@ -3,10 +3,12 @@ import type {
   GenerationRecord,
   NormalizedChatMessage,
   NormalizedGenerationEvent,
+  PsfnDeliveryState,
   RoomMessage
 } from "@writers-room/contracts";
 import { deriveContextPolicy } from "@writers-room/contracts";
 import type { ModelProvider } from "../providers/model-provider.js";
+import { PsfnProvider, PsfnProviderError } from "../providers/psfn.js";
 import { uuidv7 } from "../shared/id.js";
 import { RoomStore } from "../storage/room-store.js";
 import type {
@@ -15,6 +17,7 @@ import type {
 } from "../tools/room-tools.js";
 import { assembleAgentMessages } from "./context-assembler.js";
 import { ensureConversationCompaction } from "./context-compactor.js";
+import { assemblePsfnTurn, renderPsfnEnvelope } from "./psfn-turn-assembler.js";
 
 const MAX_TOOL_ROUNDS = 8;
 const MAX_TOOL_CALLS = 24;
@@ -196,6 +199,8 @@ export class RoomEngine {
     roomId: string;
     agentId: string;
     targetMessageId?: string;
+    retryPsfnState?: PsfnDeliveryState;
+    resynchronizePsfn?: boolean;
   }): Promise<{ message: RoomMessage; generation: GenerationRecord }> {
     const snapshot = this.store.getSnapshot(input.roomId);
     if (snapshot.room.status !== "running") throw new Error("Room is paused");
@@ -206,8 +211,27 @@ export class RoomEngine {
     }
     const provider = this.providers.get(agent.provider);
     if (!provider) throw new Error(`Provider is not configured: ${agent.provider}`);
-    const capabilities = await provider.getCapabilities(agent.modelId)
-      .catch(() => undefined);
+    const psfnState = provider.execution?.semantics === "stateful-companion"
+      ? this.store.getPsfnDeliveryState(input.roomId, input.agentId)
+      : undefined;
+    if (
+      provider.execution?.semantics === "stateful-companion" &&
+      input.retryPsfnState === undefined &&
+      input.resynchronizePsfn !== true &&
+      psfnState?.deliveryStatus === "ambiguous"
+    ) {
+      throw new Error("PSFN delivery is ambiguous and requires human resolution");
+    }
+    if (
+      provider instanceof PsfnProvider &&
+      !provider.pinnedCompanionId &&
+      psfnState?.remoteCompanionId
+    ) {
+      provider.pinExpectedIdentity(psfnState.remoteCompanionId);
+    }
+    const capabilities = provider.execution?.semantics === "stateful-companion"
+      ? await provider.getCapabilities(agent.modelId)
+      : await provider.getCapabilities(agent.modelId).catch(() => undefined);
     if (capabilities === undefined) {
       throw new Error(
         `Model capabilities are unavailable: ${agent.provider}/${agent.modelId}`
@@ -268,6 +292,28 @@ export class RoomEngine {
     const startedAtMs = Date.now();
 
     try {
+      if (provider.execution?.semantics === "stateful-companion") {
+        if (!(provider instanceof PsfnProvider) || !provider.streamParticipantTurn) {
+          throw new Error("Stateful companion provider does not implement the PSFN participant path");
+        }
+        return await this.generatePsfnTurn({
+          snapshot: this.store.getSnapshot(input.roomId),
+          agent: effectiveAgent,
+          provider,
+          generation,
+          generationId,
+          message,
+          controller,
+          startedAtMs,
+          ...(input.targetMessageId === undefined
+            ? {}
+            : { targetMessageId: input.targetMessageId }),
+          ...(input.retryPsfnState === undefined
+            ? {}
+            : { retryState: input.retryPsfnState }),
+          ...(input.resynchronizePsfn === true ? { resynchronization: true } : {})
+        });
+      }
       ensureConversationCompaction({
         store: this.store,
         roomId: input.roomId,
@@ -503,6 +549,7 @@ export class RoomEngine {
       generation = this.store.updateGeneration(generationId, {
         ...generation,
         retrievedChunkIds: citedChunkIds,
+        disposition: generation.disposition ?? "published",
         status: "complete",
         completedAt,
         latencyMs: Date.now() - startedAtMs
@@ -544,6 +591,46 @@ export class RoomEngine {
     return true;
   }
 
+  async retryPsfnDelivery(input: {
+    roomId: string;
+    agentId: string;
+  }): Promise<{ message: RoomMessage; generation: GenerationRecord }> {
+    const state = this.store.getPsfnDeliveryState(input.roomId, input.agentId);
+    if (
+      !state ||
+      state.deliveryStatus !== "ambiguous" ||
+      !state.inflightDeliveryId ||
+      !state.inflightEnvelope ||
+      !state.inflightEnvelopeDigest
+    ) {
+      throw new Error("No complete ambiguous PSFN delivery requires retry");
+    }
+    return this.generate({
+      ...input,
+      retryPsfnState: state
+    });
+  }
+
+  async resynchronizePsfnDelivery(input: {
+    roomId: string;
+    agentId: string;
+  }): Promise<{ message: RoomMessage; generation: GenerationRecord }> {
+    const state = this.store.getPsfnDeliveryState(input.roomId, input.agentId);
+    const latestTarget = [...this.store.listMessages(input.roomId)].reverse().find(message =>
+      message.lifecycle === "active" &&
+      (message.status === "complete" || message.status === "edited") &&
+      (message.authorType === "human" || message.authorType === "agent")
+    );
+    if (!state || state.deliveryStatus !== "ambiguous" || !latestTarget) {
+      throw new Error("No ambiguous PSFN delivery can be resynchronized");
+    }
+    return this.generate({
+      ...input,
+      targetMessageId: latestTarget.id,
+      resynchronizePsfn: true
+    });
+  }
+
   interruptRoom(roomId: string): number {
     let interrupted = 0;
     for (const active of this.active.values()) {
@@ -571,6 +658,9 @@ export class RoomEngine {
         });
       });
     }
+    if ([...this.active.values()].some(generation => generation.roomId === roomId)) {
+      throw new Error("Room generation did not stop before the operation timeout");
+    }
     return active.length;
   }
 
@@ -582,6 +672,32 @@ export class RoomEngine {
       interrupted += 1;
     }
     return interrupted;
+  }
+
+  async interruptAgentAndWait(
+    roomId: string,
+    agentId: string,
+    timeoutMs = 5_000
+  ): Promise<number> {
+    const active = [...this.active.values()].filter(generation =>
+      generation.roomId === roomId && generation.agentId === agentId
+    );
+    for (const generation of active) generation.controller.abort();
+    if (active.length > 0) {
+      await new Promise<void>(resolve => {
+        const timeout = setTimeout(resolve, timeoutMs);
+        void Promise.all(active.map(generation => generation.completion)).then(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    }
+    if ([...this.active.values()].some(generation =>
+      generation.roomId === roomId && generation.agentId === agentId
+    )) {
+      throw new Error("Participant generation did not stop before removal timeout");
+    }
+    return active.length;
   }
 
   private buildRequest(
@@ -621,6 +737,222 @@ export class RoomEngine {
       sessionId: `${snapshot.room.id}:${agent.id}`,
       signal
     };
+  }
+
+  private async generatePsfnTurn(input: {
+    snapshot: ReturnType<RoomStore["getSnapshot"]>;
+    agent: AgentDefinition;
+    provider: PsfnProvider;
+    generation: GenerationRecord;
+    generationId: string;
+    message: RoomMessage;
+    controller: AbortController;
+    startedAtMs: number;
+    targetMessageId?: string;
+    retryState?: PsfnDeliveryState;
+    resynchronization?: boolean;
+  }): Promise<{ message: RoomMessage; generation: GenerationRecord }> {
+    let generation = input.generation;
+    const target = input.retryState
+      ? undefined
+      : input.targetMessageId === undefined
+      ? [...input.snapshot.messages].reverse().find(candidate =>
+          candidate.lifecycle === "active" &&
+          (candidate.status === "complete" || candidate.status === "edited") &&
+          (candidate.authorType === "human" || candidate.authorType === "agent")
+        )
+      : input.snapshot.messages.find(candidate => candidate.id === input.targetMessageId);
+    if (!input.retryState && !target?.content.trim()) {
+      throw new Error("PSFN participant turn requires a public reply target");
+    }
+    let retrievedEvidence: ToolExecutionResult | undefined;
+    if (this.tools && target && !input.retryState) {
+      retrievedEvidence = await this.tools.collectParticipantEvidence({
+        roomId: input.snapshot.room.id,
+        agentId: input.agent.id,
+        query: target.content,
+        limit: 6,
+        signal: input.controller.signal
+      });
+      generation = this.store.updateGeneration(input.generationId, {
+        retrievedChunkIds: retrievedEvidence.citedChunkIds
+      });
+    }
+    const existing = this.store.getPsfnDeliveryState(
+      input.snapshot.room.id,
+      input.agent.id
+    );
+    if (!input.provider.pinnedCompanionId && existing?.remoteCompanionId) {
+      input.provider.pinExpectedIdentity(existing.remoteCompanionId);
+    }
+    const identity = await input.provider.verifyConnection(input.controller.signal);
+    if (!input.provider.pinnedCompanionId) {
+      input.provider.pinExpectedIdentity(identity.companionId);
+    }
+    if (input.resynchronization && existing?.deliveryStatus !== "ambiguous") {
+      throw new Error("No ambiguous PSFN delivery can be resynchronized");
+    }
+    const assembled = input.retryState
+      ? {
+          request: {
+            generationId: input.retryState.inflightDeliveryId!,
+            room: {
+              id: input.snapshot.room.id,
+              title: input.snapshot.room.title,
+              conversationStyle: input.snapshot.room.settings.conversationStyle,
+              responseLength: input.snapshot.room.settings.responseLength
+            },
+            agent: {
+              id: input.agent.id,
+              name: input.agent.name,
+              description: input.agent.description,
+              modelId: input.agent.modelId
+            },
+            participants: input.snapshot.agents.map(agent => ({
+              id: agent.id,
+              name: agent.name,
+              description: agent.description
+            })),
+            triggerMessageId: input.retryState.inflightTriggerMessageId ?? "ambiguous-delivery",
+            pendingMessages: [],
+            evidence: [],
+            sessionId: input.retryState.sessionKey,
+            responseStyle: input.snapshot.room.settings.responseLength === "short"
+              ? "concise" as const
+              : "expressive" as const,
+            preRenderedEnvelope: input.retryState.inflightEnvelope!,
+            signal: input.controller.signal
+          },
+          highSequence: input.retryState.inflightHighSequence ??
+            input.retryState.lastDeliveredSequence,
+          envelopeDigest: input.retryState.inflightEnvelopeDigest!
+        }
+      : assemblePsfnTurn({
+          snapshot: input.snapshot,
+          agent: input.agent,
+          generationId: input.generationId,
+          triggerMessageId: target!.id,
+          lastDeliveredSequence: input.resynchronization
+            ? 0
+            : existing?.lastDeliveredSequence ?? 0,
+          evidence: retrievedEvidence?.evidence ?? [],
+          characterLimit: Math.min(
+            1_000_000,
+            Math.max(8_000, Math.floor((input.agent.capabilities?.contextLength ?? 32_768) * 3))
+          ),
+          resynchronization: input.resynchronization === true,
+          signal: input.controller.signal
+        });
+    if (!input.retryState && existing?.sessionKey) {
+      assembled.request.sessionId = existing.sessionKey;
+    }
+    const deliveryId = input.retryState?.inflightDeliveryId ?? input.generationId;
+    if (input.retryState?.inflightChunkIds) {
+      generation = this.store.updateGeneration(input.generationId, {
+        retrievedChunkIds: input.retryState.inflightChunkIds
+      });
+    }
+    let deliveryStarted = false;
+    try {
+      if (input.retryState) {
+        this.store.restartAmbiguousPsfnDelivery(
+          input.snapshot.room.id,
+          input.agent.id
+        );
+      } else if (input.resynchronization) {
+        this.store.beginPsfnResynchronization({
+          roomId: input.snapshot.room.id,
+          agentId: input.agent.id,
+          remoteCompanionId: identity.companionId,
+          sessionMode: input.provider.configuredSessionMode,
+          sessionKey: assembled.request.sessionId,
+          deliveryId,
+          highSequence: assembled.highSequence,
+          envelopeDigest: assembled.envelopeDigest,
+          envelope: assembled.request.preRenderedEnvelope ?? renderPsfnEnvelope(assembled.request),
+          triggerMessageId: assembled.request.triggerMessageId,
+          chunkIds: generation.retrievedChunkIds
+        });
+      } else {
+        this.store.beginPsfnDelivery({
+          roomId: input.snapshot.room.id,
+          agentId: input.agent.id,
+          remoteCompanionId: identity.companionId,
+          sessionMode: input.provider.configuredSessionMode,
+          sessionKey: assembled.request.sessionId,
+          deliveryId,
+          highSequence: assembled.highSequence,
+          envelopeDigest: assembled.envelopeDigest,
+          envelope: assembled.request.preRenderedEnvelope ?? renderPsfnEnvelope(assembled.request),
+          triggerMessageId: assembled.request.triggerMessageId,
+          chunkIds: generation.retrievedChunkIds
+        });
+      }
+      deliveryStarted = true;
+      for await (const event of input.provider.streamParticipantTurn!(assembled.request)) {
+        generation = this.applyGenerationEvent(generation, event);
+        this.store.appendGenerationEvent(input.generationId, event.type, event);
+        if (event.type === "text-delta") {
+          this.store.updateMessage(input.message.id, { content: generation.finalText });
+        }
+      }
+      this.store.completePsfnDelivery(
+        input.snapshot.room.id,
+        input.agent.id,
+        deliveryId
+      );
+      deliveryStarted = false;
+    } catch (error) {
+      if (deliveryStarted) {
+        if (
+          input.resynchronization &&
+          existing &&
+          error instanceof PsfnProviderError &&
+          error.definitivePreAdmission
+        ) {
+          this.store.restorePsfnAmbiguity(existing, deliveryId);
+        } else if (
+          !input.retryState &&
+          error instanceof PsfnProviderError &&
+          error.definitivePreAdmission
+        ) {
+          this.store.clearPsfnInflight(
+            input.snapshot.room.id,
+            input.agent.id,
+            deliveryId
+          );
+        } else {
+          this.store.markPsfnDeliveryAmbiguous(
+            input.snapshot.room.id,
+            input.agent.id,
+            deliveryId
+          );
+        }
+      }
+      throw error;
+    }
+    const completedAt = new Date().toISOString();
+    const citedChunkIds = this.store.recordCitations({
+      generationId: input.generationId,
+      messageId: input.message.id,
+      chunkIds: generation.retrievedChunkIds
+    });
+    generation = this.store.updateGeneration(input.generationId, {
+      ...generation,
+      disposition: generation.disposition ?? (generation.finalText.trim() ? "published" : "no-reply"),
+      retrievedChunkIds: citedChunkIds,
+      status: "complete",
+      completedAt,
+      latencyMs: Date.now() - input.startedAtMs
+    });
+    const noReply = generation.disposition === "no-reply";
+    const completeMessage = this.store.updateMessage(input.message.id, {
+      content: generation.finalText,
+      status: "complete",
+      lifecycle: noReply ? "deleted" : "active",
+      citedChunkIds
+    });
+    return { message: completeMessage, generation };
   }
 
   private applyGenerationEvent(
@@ -666,8 +998,12 @@ export class RoomEngine {
           ...(event.provider === undefined ? {} : { actualProvider: event.provider })
         };
       case "tool-call":
-      case "done":
         return generation;
+      case "done":
+        return {
+          ...generation,
+          ...(event.disposition === undefined ? {} : { disposition: event.disposition })
+        };
     }
   }
 

@@ -8,7 +8,10 @@ import type {
   NormalizedChatRequest,
   NormalizedGenerationEvent
 } from "@writers-room/contracts";
-import type { ModelProvider } from "../providers/model-provider.js";
+import {
+  statefulCompanionExecution,
+  type ModelProvider
+} from "../providers/model-provider.js";
 import { RoomStore } from "../storage/room-store.js";
 import { ParticipantModelActivationEvaluator } from "./activation-evaluator.js";
 
@@ -74,7 +77,75 @@ class ReasoningHungryActivationProvider implements ModelProvider {
   }
 }
 
+class StatefulFixtureProvider implements ModelProvider {
+  readonly id = "psfn";
+  readonly execution = statefulCompanionExecution;
+  calls = 0;
+
+  async listModels(): Promise<ModelDescriptor[]> {
+    return [{ id: "remote-companion", name: "Remote", capabilities }];
+  }
+
+  async getCapabilities(): Promise<ModelCapabilities> {
+    return capabilities;
+  }
+
+  async *streamChat(): AsyncIterable<NormalizedGenerationEvent> {
+    this.calls += 1;
+    throw new Error("Stateful provider must not receive activation");
+  }
+}
+
 describe("participant activation evaluator", () => {
+  it("routes stateful-companion activation through the fallback model", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-activation-route-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Stateful activation room" });
+    const agent = store.addAgent(room.id, {
+      id: "remote",
+      name: "Remote Companion",
+      description: "Offers a durable outside perspective.",
+      provider: "psfn",
+      modelId: "remote-companion",
+      systemPrompt: "",
+      temperature: 0.7,
+      maxOutputTokens: 2_000,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        automatic: true,
+        softLimitTokens: 32_768,
+        hardLimitTokens: 32_768,
+        recentTranscriptTokens: 16_000,
+        retrievedContextTokens: 8_000,
+        notebookTokens: 0
+      },
+      capabilities: { ...capabilities, reasoningInputControl: false }
+    });
+    const message = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Should the remote companion join?"
+    });
+    const stateful = new StatefulFixtureProvider();
+    const fallback = new ReasoningHungryActivationProvider();
+    const evaluator = new ParticipantModelActivationEvaluator(new Map<string, ModelProvider>([
+      [stateful.id, stateful],
+      [fallback.id, fallback]
+    ]), () => ({ provider: "openrouter", modelId: "reasoning/model" }));
+
+    await expect(evaluator.evaluate({
+      room: store.getSnapshot(room.id),
+      agent,
+      eventMessage: message
+    })).resolves.toMatchObject({ shouldRespond: true });
+    expect(stateful.calls).toBe(0);
+    expect(fallback.requests).toHaveLength(1);
+    store.close();
+  });
+
   it("reserves enough output for a reasoning model to emit its final decision", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-activation-budget-"));
     roots.push(root);

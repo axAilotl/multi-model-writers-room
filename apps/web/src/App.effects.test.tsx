@@ -66,6 +66,89 @@ afterEach(() => {
 });
 
 describe("App effect lifecycle", () => {
+  it("shows an inspectable quiet-outcome record instead of an empty reply bubble", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => {}
+    });
+    const noReplySnapshot = {
+      ...snapshot,
+      agents: [{
+        id: "quiet-agent",
+        name: "Quiet Agent",
+        description: "Speaks selectively.",
+        provider: "openrouter",
+        modelId: "fixture/model",
+        systemPrompt: "Speak only when useful.",
+        temperature: 0.7,
+        maxOutputTokens: 512,
+        reasoning: { enabled: false, displayMode: "hidden" },
+        tools: [],
+        contextBudget: {
+          softLimitTokens: 4_000,
+          hardLimitTokens: 8_000,
+          recentTranscriptTokens: 2_000,
+          retrievedContextTokens: 1_000,
+          notebookTokens: 0
+        }
+      }],
+      messages: [{
+        id: "quiet-message",
+        roomId: room.id,
+        authorType: "agent",
+        authorId: "quiet-agent",
+        content: "",
+        createdAt: "2026-07-31T00:01:00.000Z",
+        sequence: 1,
+        generationId: "quiet-generation",
+        status: "complete",
+        lifecycle: "deleted",
+        visibility: "public"
+      }],
+      generations: [{
+        id: "quiet-generation",
+        roomId: room.id,
+        messageId: "quiet-message",
+        agentId: "quiet-agent",
+        requestedProvider: "openrouter",
+        requestedModelId: "fixture/model",
+        finalText: "",
+        disposition: "no-reply",
+        toolCalls: [],
+        retrievedChunkIds: [],
+        status: "complete",
+        startedAt: "2026-07-31T00:01:00.000Z",
+        completedAt: "2026-07-31T00:01:01.000Z"
+      }]
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      const payload = path.endsWith("/api/v1/rooms")
+        ? { rooms: [room] }
+        : noReplySnapshot;
+      return new Response(JSON.stringify(payload), {
+        headers: { "content-type": "application/json" }
+      });
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    const quietRecord = container.querySelector(".no-reply-message");
+    expect(quietRecord?.textContent).toContain("Chose not to add a public reply.");
+    expect(quietRecord?.querySelector(".detail-toggle")?.textContent).toContain("Inspect");
+    expect(quietRecord?.querySelector(".tail-actions")).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
   it("keeps an unsent message in the composer when the API gateway rejects it", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.stubGlobal("WebSocket", FakeWebSocket);

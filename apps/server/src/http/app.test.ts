@@ -8,6 +8,7 @@ import type {
   NormalizedChatRequest,
   NormalizedGenerationEvent
 } from "@writers-room/contracts";
+import { createDefaultVoiceConfiguration } from "@writers-room/contracts";
 import { createHttpApplication } from "./app.js";
 import type { ModelProvider, ModelDescriptor } from "../providers/model-provider.js";
 import { ProviderConnectionManager } from "../providers/provider-connections.js";
@@ -246,6 +247,558 @@ afterEach(() => {
 });
 
 describe("local HTTP room seam", () => {
+  it("keeps the PSFN provider hidden unless its feature flag is enabled", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const providers = new Map<string, ModelProvider>();
+    const application = createHttpApplication({ store, providers });
+
+    const settings = await request(application)
+      .get("/api/v1/settings/providers")
+      .expect(200);
+    expect(settings.body.providers.some((provider: { provider: string }) =>
+      provider.provider === "psfn"
+    )).toBe(false);
+    await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({ baseUrl: "https://companion.example.invalid/v1" })
+      .expect(404);
+    store.close();
+  });
+
+  it("tests and pins an enabled PSFN identity without sending a chat turn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/identity")) {
+        return new Response(JSON.stringify({
+          object: "psfn.identity",
+          companion: { id: "remote-companion", name: "Remote Companion" }
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.endsWith("/models")) {
+        return new Response(JSON.stringify({
+          data: [{ id: "remote-companion", owned_by: "psfn" }]
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected PSFN request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      PSFN_PROVIDER_ENABLED: "true"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    const saved = await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({
+        baseUrl: "https://companion.example.invalid",
+        apiKey: "psfn-test-bearer",
+        sessionMode: "fixed",
+        contextLength: 65_536
+      })
+      .expect(200);
+    expect(saved.body.provider).toMatchObject({
+      provider: "psfn",
+      configured: true,
+      hasApiKey: true,
+      sessionMode: "fixed",
+      connectionState: "connected",
+      expectedCompanionId: "remote-companion",
+      remoteCompanionId: "remote-companion",
+      remoteCompanionName: "Remote Companion"
+    });
+    expect(JSON.stringify(saved.body)).not.toContain("psfn-test-bearer");
+    expect(store.listVoiceTemplates()).toContainEqual(expect.objectContaining({
+      provider: "psfn",
+      modelId: "remote-companion",
+      name: "Remote Companion",
+      systemPrompt: ""
+    }));
+
+    const tested = await request(application)
+      .post("/api/v1/settings/providers/psfn/test")
+      .send({})
+      .expect(200);
+    expect(tested.body.provider).toMatchObject({
+      connectionState: "connected",
+      expectedCompanionId: "remote-companion",
+      remoteCompanionId: "remote-companion",
+      remoteCompanionName: "Remote Companion"
+    });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher.mock.calls.some(([input]) =>
+      String(input).includes("chat/completions")
+    )).toBe(false);
+    expect(store.listVoiceTemplates().filter(template =>
+      template.provider === "psfn" && template.modelId === "remote-companion"
+    )).toHaveLength(1);
+    expect(store.listProviderConnectionConfigurations()).toContainEqual(
+      expect.objectContaining({
+        provider: "psfn",
+        expectedCompanionId: "remote-companion"
+      })
+    );
+    await request(application)
+      .put("/api/v1/settings/default-model")
+      .send({ provider: "psfn", modelId: "remote-companion" })
+      .expect(400);
+
+    const firstRoom = store.createRoom({ title: "First fixed room" });
+    const secondRoom = store.createRoom({ title: "Second fixed room" });
+    const remoteVoice = (id: string) => ({
+      id,
+      name: "Remote Companion",
+      description: "Stateful PSFN participant",
+      provider: "psfn" as const,
+      modelId: "remote-companion",
+      systemPrompt: "",
+      ...createDefaultVoiceConfiguration()
+    });
+    await request(application)
+      .post(`/api/v1/rooms/${firstRoom.id}/agents`)
+      .send(remoteVoice("remote-one"))
+      .expect(201);
+    await request(application)
+      .post(`/api/v1/rooms/${secondRoom.id}/agents`)
+      .send(remoteVoice("remote-two"))
+      .expect(409);
+    await request(application)
+      .post(`/api/v1/rooms/${secondRoom.id}/agents`)
+      .send({ ...remoteVoice("remote-two"), confirmSharedPsfnSession: true })
+      .expect(201);
+    store.close();
+  });
+
+  it("detects and explicitly accepts a changed PSFN identity on the same endpoint", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    let companionId = "first-companion";
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/identity")) {
+        return Response.json({
+          object: "psfn.identity",
+          companion: { id: companionId, name: companionId }
+        });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: `${companionId}-model` }] });
+      }
+      throw new Error(`Unexpected PSFN request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      PSFN_PROVIDER_ENABLED: "true"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({ baseUrl: "https://stable.example.invalid" })
+      .expect(200);
+    const room = store.createRoom({ title: "Identity migration room" });
+    store.addAgent(room.id, {
+      id: "remote",
+      voiceTemplateId: store.listVoiceTemplates()[0]!.id,
+      name: "First Companion",
+      description: "Remote participant",
+      provider: "psfn",
+      modelId: "first-companion-model",
+      systemPrompt: "",
+      personaPrompt: "",
+      ...createDefaultVoiceConfiguration()
+    });
+    store.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "remote",
+      remoteCompanionId: "first-companion",
+      sessionMode: "header",
+      sessionKey: "writers-room:identity-migration:remote:v1",
+      deliveryId: "completed-delivery",
+      highSequence: 0,
+      envelopeDigest: "a".repeat(64)
+    });
+    store.completePsfnDelivery(room.id, "remote", "completed-delivery");
+    companionId = "second-companion";
+
+    await request(application)
+      .post("/api/v1/settings/providers/psfn/test")
+      .send({})
+      .expect(409);
+    const drifted = await request(application)
+      .get("/api/v1/settings/providers")
+      .expect(200);
+    expect(drifted.body.providers).toContainEqual(expect.objectContaining({
+      provider: "psfn",
+      expectedCompanionId: "first-companion",
+      remoteCompanionId: "second-companion",
+      connectionState: "identity-drift"
+    }));
+
+    const accepted = await request(application)
+      .post("/api/v1/settings/providers/psfn/test")
+      .send({ acceptIdentityChange: true })
+      .expect(200);
+    expect(accepted.body.provider).toMatchObject({
+      expectedCompanionId: "second-companion",
+      remoteCompanionId: "second-companion",
+      connectionState: "connected"
+    });
+    expect(store.listProviderConnectionConfigurations()).toContainEqual(
+      expect.objectContaining({
+        provider: "psfn",
+        expectedCompanionId: "second-companion"
+      })
+    );
+    expect(store.getPsfnDeliveryState(room.id, "remote")).toBeUndefined();
+    expect(store.getRoomAgent(room.id, "remote").modelId)
+      .toBe("second-companion-model");
+    expect(store.getRoomAgent(room.id, "remote").name).toBe("second-companion");
+    expect(store.listVoiceTemplates().filter(template =>
+      template.provider === "psfn"
+    )).toMatchObject([{
+      modelId: "second-companion-model",
+      name: "second-companion"
+    }]);
+
+    store.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "remote",
+      remoteCompanionId: "second-companion",
+      sessionMode: "header",
+      sessionKey: "writers-room:identity-migration:remote:v2",
+      deliveryId: "ambiguous-second-delivery",
+      highSequence: 0,
+      envelopeDigest: "b".repeat(64),
+      envelope: "Exact second-companion envelope"
+    });
+    store.markPsfnDeliveryAmbiguous(
+      room.id,
+      "remote",
+      "ambiguous-second-delivery"
+    );
+    companionId = "third-companion";
+    await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({
+        baseUrl: "https://stable.example.invalid",
+        expectedCompanionId: "third-companion"
+      })
+      .expect(409);
+    expect(store.listProviderConnectionConfigurations()).toContainEqual(
+      expect.objectContaining({ expectedCompanionId: "second-companion" })
+    );
+    expect(store.getPsfnDeliveryState(room.id, "remote")).toMatchObject({
+      remoteCompanionId: "second-companion",
+      deliveryStatus: "ambiguous",
+      inflightEnvelope: "Exact second-companion envelope"
+    });
+
+    store.resolvePsfnDelivery(room.id, "remote", "assume-delivered");
+    const directlySaved = await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({
+        baseUrl: "https://stable.example.invalid",
+        expectedCompanionId: "third-companion"
+      })
+      .expect(200);
+    expect(directlySaved.body.provider).toMatchObject({
+      expectedCompanionId: "third-companion",
+      remoteCompanionId: "third-companion",
+      connectionState: "connected"
+    });
+    expect(store.getPsfnDeliveryState(room.id, "remote")).toBeUndefined();
+    expect(store.getRoomAgent(room.id, "remote")).toMatchObject({
+      modelId: "third-companion-model",
+      name: "third-companion"
+    });
+    expect(store.listVoiceTemplates().filter(template =>
+      template.provider === "psfn"
+    )).toMatchObject([{
+      modelId: "third-companion-model",
+      name: "third-companion"
+    }]);
+    store.close();
+  });
+
+  it("clips a long remote PSFN display name only for local voice fields", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const longName = "Remote Companion ".repeat(12).trim();
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/identity")) {
+        return Response.json({
+          object: "psfn.identity",
+          companion: { id: "long-name-companion", name: longName }
+        });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: "long-name-model" }] });
+      }
+      throw new Error(`Unexpected PSFN request: ${url}`);
+    }));
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      PSFN_PROVIDER_ENABLED: "true"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    const saved = await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({ baseUrl: "https://long-name.example.invalid" })
+      .expect(200);
+
+    expect(saved.body.provider.remoteCompanionName).toBe(longName);
+    const template = store.listVoiceTemplates()[0]!;
+    expect(template.name).toHaveLength(80);
+    expect(longName.startsWith(template.name)).toBe(true);
+    expect(template.modelId).toBe("long-name-model");
+    store.close();
+  });
+
+  it("guards and migrates identity acceptance when the previous PSFN pin exists only in the environment", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const template = store.createVoiceTemplate({
+      ...createDefaultVoiceConfiguration(),
+      title: "PSFN — Environment Old",
+      name: "Environment Old",
+      description: "Stateful PSFN companion with remotely owned persona, memory, prompt, and faculties.",
+      provider: "psfn",
+      modelId: "environment-old-model",
+      systemPrompt: "",
+      personaPrompt: "",
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: []
+    });
+    const room = store.createRoom({ title: "Environment identity migration" });
+    store.addAgent(room.id, {
+      id: "environment-remote",
+      voiceTemplateId: template.id,
+      name: template.name,
+      description: template.description,
+      provider: "psfn",
+      modelId: template.modelId,
+      systemPrompt: "",
+      personaPrompt: "",
+      ...createDefaultVoiceConfiguration()
+    });
+    store.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "environment-remote",
+      remoteCompanionId: "environment-old",
+      sessionMode: "header",
+      sessionKey: "writers-room:environment-identity:remote:v1",
+      deliveryId: "environment-ambiguous",
+      highSequence: 0,
+      envelopeDigest: "c".repeat(64),
+      envelope: "Environment-pinned exact envelope"
+    });
+    store.markPsfnDeliveryAmbiguous(
+      room.id,
+      "environment-remote",
+      "environment-ambiguous"
+    );
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/identity")) {
+        return Response.json({
+          object: "psfn.identity",
+          companion: { id: "environment-new", name: "Environment New" }
+        });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: "environment-new-model" }] });
+      }
+      throw new Error(`Unexpected PSFN request: ${url}`);
+    }));
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      PSFN_PROVIDER_ENABLED: "true",
+      PSFN_BASE_URL: "https://environment-pin.example.invalid/v1",
+      PSFN_EXPECTED_COMPANION_ID: "environment-old"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    await request(application)
+      .post("/api/v1/settings/providers/psfn/test")
+      .send({ acceptIdentityChange: true })
+      .expect(409);
+    expect(store.listProviderConnectionConfigurations()).toEqual([]);
+    expect(store.getPsfnDeliveryState(room.id, "environment-remote")).toMatchObject({
+      remoteCompanionId: "environment-old",
+      deliveryStatus: "ambiguous",
+      inflightEnvelope: "Environment-pinned exact envelope"
+    });
+
+    store.resolvePsfnDelivery(room.id, "environment-remote", "assume-delivered");
+    const accepted = await request(application)
+      .post("/api/v1/settings/providers/psfn/test")
+      .send({ acceptIdentityChange: true })
+      .expect(200);
+    expect(accepted.body.provider).toMatchObject({
+      expectedCompanionId: "environment-new",
+      remoteCompanionId: "environment-new",
+      connectionState: "connected"
+    });
+    expect(store.getPsfnDeliveryState(room.id, "environment-remote"))
+      .toBeUndefined();
+    expect(store.getRoomAgent(room.id, "environment-remote")).toMatchObject({
+      modelId: "environment-new-model",
+      name: "Environment New"
+    });
+    expect(store.getVoiceTemplate(template.id)).toMatchObject({
+      modelId: "environment-new-model",
+      name: "Environment New"
+    });
+    store.close();
+  });
+
+  it("keeps the working PSFN connection when a replacement fails its pinned identity handshake", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const replacement = url.hostname.startsWith("replacement");
+      if (url.pathname.endsWith("/identity")) {
+        return Response.json({
+          object: "psfn.identity",
+          companion: {
+            id: replacement ? "unexpected-companion" : "original-companion",
+            name: replacement ? "Unexpected Companion" : "Original Companion"
+          }
+        });
+      }
+      if (url.pathname.endsWith("/models")) {
+        return Response.json({
+          data: [{ id: replacement ? "unexpected-companion" : "original-companion" }]
+        });
+      }
+      throw new Error(`Unexpected PSFN request: ${url.toString()}`);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      PSFN_PROVIDER_ENABLED: "true"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({
+        baseUrl: "https://original.example.invalid",
+        apiKey: "original-test-credential",
+        sessionMode: "header"
+      })
+      .expect(200);
+    const workingProvider = providers.get("psfn");
+
+    await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({ baseUrl: "https://replacement.example.invalid" })
+      .expect(409);
+
+    const status = await request(application)
+      .get("/api/v1/settings/providers")
+      .expect(200);
+    expect(status.body.providers).toContainEqual(expect.objectContaining({
+      provider: "psfn",
+      baseUrl: "https://original.example.invalid/v1",
+      expectedCompanionId: "original-companion",
+      connectionState: "connected"
+    }));
+    expect(providers.get("psfn")).toBe(workingProvider);
+    expect(store.listProviderConnectionConfigurations()).toContainEqual(
+      expect.objectContaining({
+        provider: "psfn",
+        baseUrl: "https://original.example.invalid/v1",
+        expectedCompanionId: "original-companion"
+      })
+    );
+    store.close();
+  });
+
+  it("retains an environment PSFN credential across canonically equivalent endpoint spelling", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization"))
+        .toBe("Bearer environment-test-credential");
+      const url = String(input);
+      if (url.endsWith("/identity")) {
+        return Response.json({
+          object: "psfn.identity",
+          companion: { id: "environment-companion", name: "Environment Companion" }
+        });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: "environment-companion" }] });
+      }
+      throw new Error(`Unexpected PSFN request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const providers = new Map<string, ModelProvider>();
+    const providerConnections = new ProviderConnectionManager(store, providers, {
+      PSFN_PROVIDER_ENABLED: "true",
+      PSFN_BASE_URL: "https://environment.example.invalid/v1",
+      PSFN_API_KEY: "environment-test-credential"
+    });
+    const application = createHttpApplication({
+      store,
+      providers,
+      providerConnections
+    });
+
+    const saved = await request(application)
+      .put("/api/v1/settings/providers/psfn")
+      .send({ baseUrl: "https://environment.example.invalid" })
+      .expect(200);
+
+    expect(saved.body.provider).toMatchObject({
+      provider: "psfn",
+      baseUrl: "https://environment.example.invalid/v1",
+      hasApiKey: true,
+      credentialSource: "environment",
+      connectionState: "connected"
+    });
+    expect(store.listProviderConnectionConfigurations()).toContainEqual(
+      expect.not.objectContaining({ apiKey: expect.anything() })
+    );
+    store.close();
+  });
+
   it("configures an OpenAI-compatible provider without exposing its key", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
     roots.push(root);
@@ -1507,6 +2060,63 @@ describe("local HTTP room seam", () => {
     expect(store.getSnapshot(secondRoom.id).agents).toMatchObject([
       { id: agent.id, name: agent.name }
     ]);
+    store.close();
+  });
+
+  it("fences participant removal against a generation waiting for admission", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const provider = new DeferredCapabilitiesProvider();
+    const application = createHttpApplication({
+      store,
+      providers: new Map([["openrouter", provider]])
+    });
+    const room = store.createRoom({ title: "Removal fence" });
+    const agent = {
+      id: "waiting-agent",
+      name: "Waiting Agent",
+      description: "Waits during capability discovery.",
+      provider: "openrouter" as const,
+      modelId: "fixture/model",
+      systemPrompt: "Respond.",
+      temperature: 0.5,
+      maxOutputTokens: 600,
+      reasoning: { enabled: false, displayMode: "hidden" as const },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 12_000,
+        hardLimitTokens: 16_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    };
+    store.addAgent(room.id, agent);
+    store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Start while removal is requested."
+    });
+
+    const pendingGeneration = request(application)
+      .post(`/api/v1/rooms/${room.id}/speakers/${agent.id}`)
+      .send({})
+      .then(result => result);
+    await provider.started;
+    await request(application)
+      .delete(`/api/v1/rooms/${room.id}/agents/${agent.id}`)
+      .expect(200);
+    provider.release();
+    const generation = await pendingGeneration;
+
+    expect(generation.status).toBe(404);
+    expect(store.getSnapshot(room.id).agents).toEqual([]);
+    expect(store.getSnapshot(room.id).generations).toEqual([]);
+    expect(store.getSnapshot(room.id).messages.filter(message =>
+      message.authorType === "agent"
+    )).toEqual([]);
     store.close();
   });
 

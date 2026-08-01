@@ -301,6 +301,29 @@ const migrations: ReadonlyArray<(database: Database.Database) => void> = [
         WHERE json_extract(new.payload_json, '$.status') <> 'streaming';
       END;
     `);
+  },
+  database => {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS psfn_delivery_state (
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        remote_companion_id TEXT NOT NULL,
+        session_mode TEXT NOT NULL CHECK(session_mode IN ('fixed', 'header')),
+        session_key TEXT NOT NULL,
+        last_delivered_sequence INTEGER NOT NULL DEFAULT 0,
+        inflight_delivery_id TEXT,
+        inflight_high_sequence INTEGER,
+        inflight_envelope_digest TEXT,
+        delivery_status TEXT NOT NULL CHECK(delivery_status IN ('idle', 'inflight', 'ambiguous')),
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(room_id, agent_id)
+      );
+      CREATE INDEX IF NOT EXISTS psfn_delivery_ambiguous
+      ON psfn_delivery_state(delivery_status, updated_at)
+      WHERE delivery_status = 'ambiguous';
+    `);
   }
 ];
 

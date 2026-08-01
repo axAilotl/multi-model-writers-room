@@ -71,6 +71,131 @@ describe("RoomStore public room seam", () => {
     reopened.close();
   });
 
+  it("persists PSFN delivery cursors and blocks ambiguous automatic retries", () => {
+    const first = makeStore();
+    const databasePath = first.databasePath;
+    const room = first.createRoom({ title: "Remote companion room" });
+    first.addAgent(room.id, {
+      id: "remote-agent",
+      name: "Remote Companion",
+      description: "A stateful remote participant.",
+      provider: "psfn",
+      modelId: "remote-companion",
+      systemPrompt: "",
+      personaPrompt: "",
+      ...createDefaultVoiceConfiguration()
+    });
+    first.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "remote-agent",
+      remoteCompanionId: "remote-companion",
+      sessionMode: "header",
+      sessionKey: "writers-room:room:agent:v1",
+      deliveryId: "delivery-1",
+      highSequence: 4,
+      envelopeDigest: "a".repeat(64)
+    });
+    first.completePsfnDelivery(room.id, "remote-agent", "delivery-1");
+    first.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "remote-agent",
+      remoteCompanionId: "remote-companion",
+      sessionMode: "header",
+      sessionKey: "writers-room:room:agent:v1",
+      deliveryId: "delivery-2",
+      highSequence: 6,
+      envelopeDigest: "b".repeat(64)
+    });
+    first.markPsfnDeliveryAmbiguous(room.id, "remote-agent", "delivery-2");
+    expect(() => first.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "remote-agent",
+      remoteCompanionId: "remote-companion",
+      sessionMode: "header",
+      sessionKey: "writers-room:room:agent:v1",
+      deliveryId: "delivery-3",
+      highSequence: 7,
+      envelopeDigest: "c".repeat(64)
+    })).toThrow(/requires human resolution/i);
+    first.close();
+
+    const reopened = new RoomStore(databasePath);
+    expect(reopened.getPsfnDeliveryState(room.id, "remote-agent")).toMatchObject({
+      lastDeliveredSequence: 4,
+      inflightDeliveryId: "delivery-2",
+      inflightHighSequence: 6,
+      deliveryStatus: "ambiguous"
+    });
+    reopened.resolvePsfnDelivery(room.id, "remote-agent", "assume-delivered");
+    expect(reopened.getPsfnDeliveryState(room.id, "remote-agent")).toMatchObject({
+      lastDeliveredSequence: 6,
+      deliveryStatus: "idle"
+    });
+    const priorSessionKey = reopened.getPsfnDeliveryState(
+      room.id,
+      "remote-agent"
+    )!.sessionKey;
+    reopened.resetChat(room.id);
+    expect(reopened.getPsfnDeliveryState(room.id, "remote-agent")).toMatchObject({
+      sessionVersion: 2,
+      sessionKey: expect.stringContaining(":v2")
+    });
+    expect(reopened.getPsfnDeliveryState(room.id, "remote-agent")?.sessionKey)
+      .not.toBe(priorSessionKey);
+    reopened.close();
+  });
+
+  it("recovers an in-flight PSFN delivery as ambiguous without losing its exact retry envelope", () => {
+    const first = makeStore();
+    const databasePath = first.databasePath;
+    const room = first.createRoom({ title: "Remote delivery recovery" });
+    first.addAgent(room.id, {
+      id: "remote-agent",
+      name: "Remote Companion",
+      description: "A stateful remote participant.",
+      provider: "psfn",
+      modelId: "remote-companion",
+      systemPrompt: "",
+      personaPrompt: "",
+      ...createDefaultVoiceConfiguration()
+    });
+    first.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "remote-agent",
+      remoteCompanionId: "remote-companion",
+      sessionMode: "header",
+      sessionKey: "writers-room:room:agent:v1",
+      deliveryId: "delivery-inflight",
+      highSequence: 9,
+      envelopeDigest: "d".repeat(64),
+      envelope: "Exact durable envelope",
+      triggerMessageId: "trigger-message",
+      chunkIds: ["chunk-1"]
+    });
+    first.close();
+
+    const reopened = new RoomStore(databasePath);
+    expect(reopened.getPsfnDeliveryState(room.id, "remote-agent")).toMatchObject({
+      deliveryStatus: "ambiguous",
+      inflightDeliveryId: "delivery-inflight",
+      inflightHighSequence: 9,
+      inflightEnvelope: "Exact durable envelope",
+      inflightTriggerMessageId: "trigger-message",
+      inflightChunkIds: ["chunk-1"]
+    });
+    expect(() => reopened.beginPsfnDelivery({
+      roomId: room.id,
+      agentId: "remote-agent",
+      remoteCompanionId: "remote-companion",
+      sessionMode: "header",
+      sessionKey: "writers-room:room:agent:v1",
+      deliveryId: "replacement-delivery",
+      highSequence: 10,
+      envelopeDigest: "e".repeat(64)
+    })).toThrow(/requires human resolution/i);
+    reopened.close();
+  });
+
   it("reconciles stale streaming state as interrupted after process restart", () => {
     const first = makeStore();
     const databasePath = first.databasePath;

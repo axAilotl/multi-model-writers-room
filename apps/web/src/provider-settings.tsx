@@ -1,6 +1,5 @@
-import { Check, KeyRound, LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
+import { Check, KeyRound, LoaderCircle, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { providerKinds } from "@writers-room/contracts";
 import type {
   AgentDefinition,
   DefaultModelSelection,
@@ -43,6 +42,10 @@ export function ProviderSettings() {
   const [query, setQuery] = useState("");
   const [baseUrl, setBaseUrl] = useState(defaultBaseUrls.openrouter ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [sessionMode, setSessionMode] = useState<"fixed" | "header">("header");
+  const [expectedCompanionId, setExpectedCompanionId] = useState("");
+  const [contextLength, setContextLength] = useState(32_768);
+  const [allowInsecureHttp, setAllowInsecureHttp] = useState(false);
   const [defaultModel, setDefaultModel] = useState<DefaultModelSelection>();
   const [savingDefaultId, setSavingDefaultId] = useState<string>();
   const [savingConnection, setSavingConnection] = useState(false);
@@ -85,22 +88,18 @@ export function ProviderSettings() {
   useEffect(() => {
     setBaseUrl(connection?.baseUrl ?? defaultBaseUrls[selected] ?? "");
     setApiKey("");
+    setSessionMode(connection?.sessionMode ?? "header");
+    setExpectedCompanionId(connection?.expectedCompanionId ?? "");
+    setContextLength(connection?.contextLength ?? 32_768);
+    setAllowInsecureHttp(connection?.baseUrl?.startsWith("http://") ?? false);
     setConnectionSaved(false);
     setSettingsError(undefined);
-  }, [connection?.baseUrl, selected]);
+  }, [connection?.baseUrl, connection?.contextLength, connection?.expectedCompanionId, connection?.sessionMode, selected]);
 
   function replaceConnection(next: ProviderConnectionStatus) {
-    setConnections(current => providerKinds.map(provider =>
-      provider === next.provider
-        ? next
-        : current.find(candidate => candidate.provider === provider) ?? {
-            provider,
-            configured: false,
-            hasApiKey: false,
-            endpointSource: "none",
-            credentialSource: "none"
-          }
-    ));
+    setConnections(current => current.some(candidate => candidate.provider === next.provider)
+      ? current.map(candidate => candidate.provider === next.provider ? next : candidate)
+      : [...current, next]);
   }
 
   async function saveConnection(event: React.FormEvent<HTMLFormElement>) {
@@ -111,7 +110,15 @@ export function ProviderSettings() {
     try {
       const next = await api.configureProvider(selected, {
         ...(selected === "openrouter" ? {} : { baseUrl }),
-        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {})
+        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+        ...(selected === "psfn" ? {
+          sessionMode,
+          ...(expectedCompanionId.trim()
+            ? { expectedCompanionId: expectedCompanionId.trim() }
+            : {}),
+          contextLength,
+          allowInsecureHttp
+        } : {})
       });
       replaceConnection(next);
       setBaseUrl(next.baseUrl ?? "");
@@ -122,6 +129,35 @@ export function ProviderSettings() {
       setSettingsError(
         errorValue instanceof Error ? errorValue.message : String(errorValue)
       );
+      if (selected === "psfn") {
+        void api.listProviderConnections().then(nextConnections => {
+          setConnections(nextConnections);
+        }).catch(() => undefined);
+      }
+    } finally {
+      setSavingConnection(false);
+    }
+  }
+
+  async function testConnection(acceptIdentityChange = false) {
+    setSavingConnection(true);
+    setConnectionSaved(false);
+    setSettingsError(undefined);
+    try {
+      const next = await api.testProviderConnection(selected, acceptIdentityChange);
+      replaceConnection(next);
+      setExpectedCompanionId(next.expectedCompanionId ?? "");
+      setConnectionSaved(true);
+      refresh();
+    } catch (errorValue) {
+      setSettingsError(
+        errorValue instanceof Error ? errorValue.message : String(errorValue)
+      );
+      if (selected === "psfn") {
+        void api.listProviderConnections().then(nextConnections => {
+          setConnections(nextConnections);
+        }).catch(() => undefined);
+      }
     } finally {
       setSavingConnection(false);
     }
@@ -188,8 +224,8 @@ export function ProviderSettings() {
         </div>
       </div>
       <div className="provider-strip">
-        {providerKinds.map(provider => {
-          const status = connections.find(candidate => candidate.provider === provider);
+        {connections.map(status => {
+          const provider = status.provider;
           return (
             <button
               key={provider}
@@ -257,7 +293,66 @@ export function ProviderSettings() {
               </small>
             )}
           </label>
+          {selected === "psfn" && (
+            <>
+              <label>
+                Session routing
+                <select value={sessionMode} onChange={event => setSessionMode(event.target.value as "fixed" | "header")}>
+                  <option value="header">Per-room X-Session-ID</option>
+                  <option value="fixed">Shared fixed PSFN session</option>
+                </select>
+              </label>
+              <label>
+                Expected companion ID
+                <input
+                  value={expectedCompanionId}
+                  onChange={event => setExpectedCompanionId(event.target.value)}
+                  placeholder="Pinned automatically on first successful test"
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                Adapter context limit
+                <input
+                  type="number"
+                  min={4_096}
+                  max={1_000_000}
+                  value={contextLength}
+                  onChange={event => setContextLength(Number(event.target.value))}
+                />
+              </label>
+              <label className="provider-checkbox">
+                <input
+                  type="checkbox"
+                  checked={allowInsecureHttp}
+                  onChange={event => setAllowInsecureHttp(event.target.checked)}
+                />
+                Allow HTTP for private or loopback hosts
+              </label>
+            </>
+          )}
         </div>
+        {selected === "psfn" && (
+          <div className="psfn-connection-summary">
+            <ShieldCheck size={15} />
+            <div>
+              <strong>Stateful PSFN companion</strong>
+              <span>
+                {connection?.remoteCompanionName
+                  ? `${connection.remoteCompanionName} · ${connection.remoteCompanionId}`
+                  : "Identity is verified and pinned by the connection test."}
+              </span>
+              <small>Status: {connection?.connectionState ?? "unconfigured"}. PSFN owns its persona, prompt, memory, and faculties.</small>
+              <small>A successful handshake creates one deduplicated PSFN voice template for adding the companion to rooms.</small>
+              <small>{contextLength.toLocaleString()} tokens is a local envelope-budget estimate, not a claim about PSFN’s retained memory.</small>
+              {sessionMode === "fixed" && (
+                <small className="credential-guidance">
+                  Shared remote continuity: local rooms and chat resets do not erase or isolate PSFN history.
+                </small>
+              )}
+            </div>
+          </div>
+        )}
         <footer>
           {(connection?.endpointSource === "settings" ||
             connection?.credentialSource === "settings") && (
@@ -274,6 +369,15 @@ export function ProviderSettings() {
             </button>
           )}
           {connectionSaved && <span className="saved-label"><Check size={12} /> Saved</span>}
+          {connection?.configured && (
+            <button
+              type="button"
+              disabled={savingConnection || removingConnection}
+              onClick={() => void testConnection(connection.connectionState === "identity-drift")}
+            >
+              {connection.connectionState === "identity-drift" ? "Accept new identity" : "Test connection"}
+            </button>
+          )}
           <button type="submit" className="primary-button" disabled={savingConnection || removingConnection}>
             {savingConnection && <LoaderCircle size={12} className="spin" />}
             Save & load models
@@ -319,7 +423,7 @@ export function ProviderSettings() {
             <div key={model.id}>
               <div><strong>{model.name}</strong><code>{model.id}</code></div>
               <span>{Math.round(model.capabilities.contextLength / 1_000)}k</span>
-              <span>{model.capabilities.toolCalling ? "tools" : "text"}</span>
+              <span>{selected === "psfn" ? "stateful companion / text" : model.capabilities.toolCalling ? "tools" : "text"}</span>
               <span>{model.capabilities.reasoningOutput ? "reasoning" : "—"}</span>
               <button
                 type="button"
@@ -331,11 +435,14 @@ export function ProviderSettings() {
                 }
                 disabled={
                   savingDefaultId !== undefined ||
+                  selected === "psfn" ||
                   !model.capabilities.textInput
                 }
                 aria-busy={savingDefaultId === model.id}
                 aria-label={
-                  !model.capabilities.textInput
+                  selected === "psfn"
+                    ? `${model.name} is stateful and cannot be used as a fallback`
+                    : !model.capabilities.textInput
                     ? `${model.name} cannot be used as a text fallback`
                     : defaultModel?.provider === selected &&
                         defaultModel.modelId === model.id
@@ -346,7 +453,9 @@ export function ProviderSettings() {
               >
                 {savingDefaultId === model.id
                   ? <><LoaderCircle size={12} className="spin" /> Saving…</>
-                  : !model.capabilities.textInput
+                  : selected === "psfn"
+                    ? "Stateful only"
+                    : !model.capabilities.textInput
                     ? "No text input"
                     : defaultModel?.provider === selected &&
                       defaultModel.modelId === model.id

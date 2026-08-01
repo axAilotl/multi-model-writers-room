@@ -39,6 +39,7 @@ import type {
   GenerationRecord,
   ModelCapabilities,
   ModelDescriptor,
+  ProviderConnectionStatus,
   Room,
   RoomMessage,
   RoomSnapshot,
@@ -60,6 +61,7 @@ import {
 import { validationMessage } from "./validation.js";
 import { MarkdownMessage } from "./markdown-message.js";
 import { roomPressure, roomPressurePercent } from "./room-pressure.js";
+import { providerLabels } from "./provider-labels.js";
 import {
   applyRoomMode,
   roomModeLabel,
@@ -217,7 +219,12 @@ function MessageDetails({ generation, agent, workspaceRevision }: {
           </section>
           {inspection && inspection.citations.length > 0 && (
             <section>
-              <span className="detail-label">Retrieved sources</span>
+              <span className="detail-label">
+                {agent?.provider === "psfn" ? "Context supplied to PSFN" : "Retrieved sources"}
+              </span>
+              {agent?.provider === "psfn" && (
+                <p className="detail-help">These excerpts were included in the remote turn; they are not necessarily citations made by the companion.</p>
+              )}
               <div className="evidence-list">
                 {inspection.citations.map(citation => (
                   <div key={citation.chunkId}>
@@ -283,7 +290,10 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail, onReply 
   onReply: (message: RoomMessage) => void;
 }) {
   const bottom = useRef<HTMLDivElement>(null);
-  const messages = snapshot.messages.filter(message => message.lifecycle === "active");
+  const messages = snapshot.messages.filter(message => {
+    if (message.lifecycle === "active") return true;
+    return generationFor(snapshot, message)?.disposition === "no-reply";
+  });
   const workspaceRevision = snapshot.artifacts
     .map(artifact => `${artifact.id}:${artifact.updatedAt}`)
     .join("|");
@@ -297,11 +307,12 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail, onReply 
         const isHuman = message.authorType === "human";
         const agent = snapshot.agents.find(candidate => candidate.id === message.authorId);
         const generation = generationFor(snapshot, message);
+        const noReply = generation?.disposition === "no-reply";
         const replyContext = replyContextFor(snapshot, message);
         const isTail = index === messages.length - 1 && !isHuman && message.status !== "streaming";
         return (
           <article
-            className={`message ${isHuman ? "human-message" : "agent-message"}`}
+            className={`message ${isHuman ? "human-message" : "agent-message"}${noReply ? " no-reply-message" : ""}`}
             key={message.id}
           >
             <div
@@ -324,7 +335,9 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail, onReply 
                 </div>
               )}
               <div className="message-copy">
-                {message.content
+                {noReply
+                  ? <span className="no-reply-copy">Chose not to add a public reply.</span>
+                  : message.content
                   ? <MarkdownMessage content={message.content} />
                   : <span className="thinking">Gathering a thought…</span>}
               </div>
@@ -335,7 +348,7 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail, onReply 
                   workspaceRevision={workspaceRevision}
                 />
               )}
-              {message.status !== "streaming" && (
+              {message.status !== "streaming" && !noReply && (
                 <div className="tail-actions">
                   <button onClick={() => onReply(message)} disabled={busy}>
                     <Reply size={12} /> Reply
@@ -710,9 +723,11 @@ function AddAgent({ roomId, onAdded, onClose }: {
 }) {
   const [draft, setDraft] = useState<VoiceTemplateInput>(blankVoiceTemplate);
   const [templates, setTemplates] = useState<VoiceTemplate[]>([]);
+  const [connections, setConnections] = useState<ProviderConnectionStatus[]>([]);
   const [templateId, setTemplateId] = useState("");
   const [capabilities, setCapabilities] = useState<ModelCapabilities>();
   const [reasoningSupport, setReasoningSupport] = useState<ReasoningSupport>();
+  const [fallbackAvailable, setFallbackAvailable] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -720,11 +735,16 @@ function AddAgent({ roomId, onAdded, onClose }: {
     let cancelled = false;
     void (async () => {
       try {
-        const nextTemplates = await api.listVoiceTemplates();
+        const [nextTemplates, nextConnections] = await Promise.all([
+          api.listVoiceTemplates(),
+          api.listProviderConnections()
+        ]);
         if (cancelled) return;
         setTemplates(nextTemplates);
+        setConnections(nextConnections);
         const defaultModel = await api.getDefaultModel();
         if (cancelled) return;
+        setFallbackAvailable(defaultModel !== undefined);
         if (defaultModel) {
           setDraft(current => current.modelId
             ? current
@@ -779,7 +799,30 @@ function AddAgent({ roomId, onAdded, onClose }: {
     }
     setSaving(true);
     try {
-      await api.addAgent(roomId, result.data);
+      const selectedConnection = connections.find(connection =>
+        connection.provider === result.data.provider
+      );
+      let confirmSharedPsfnSession = false;
+      if (result.data.provider === "psfn" && selectedConnection?.sessionMode === "fixed") {
+        const rooms = await api.listRooms();
+        const otherSnapshots = await Promise.all(
+          rooms.filter(room => room.id !== roomId).map(room => api.snapshot(room.id))
+        );
+        const alreadyUsed = otherSnapshots.some(roomSnapshot =>
+          roomSnapshot.agents.some(agent => agent.provider === "psfn")
+        );
+        if (
+          alreadyUsed &&
+          !window.confirm(
+            "This PSFN connection already serves another room through one shared remote conversation. The rooms are not isolated, and deleting or resetting local chat will not erase PSFN history. Add it anyway?"
+          )
+        ) {
+          setSaving(false);
+          return;
+        }
+        confirmSharedPsfnSession = alreadyUsed;
+      }
+      await api.addAgent(roomId, result.data, confirmSharedPsfnSession);
       onAdded();
       onClose();
     } catch (errorValue) {
@@ -838,18 +881,31 @@ function AddAgent({ roomId, onAdded, onClose }: {
             <select
               value={draft.provider}
               onChange={event => {
-                update(
-                  "provider",
-                  event.target.value as AgentDefinition["provider"]
-                );
-                update("modelId", "");
+                const provider = event.target.value as AgentDefinition["provider"];
+                const remoteName = connections.find(connection =>
+                  connection.provider === provider
+                )?.remoteCompanionName;
+                setDraft(current => ({
+                  ...current,
+                  provider,
+                  modelId: "",
+                  ...(provider === "psfn" ? {
+                    ...(!current.name.trim() && remoteName ? { name: remoteName } : {}),
+                    systemPrompt: "",
+                    personaPrompt: "",
+                    reasoning: { enabled: false, displayMode: "hidden" },
+                    tools: []
+                  } : {})
+                }));
                 setCapabilities(undefined);
                 setReasoningSupport(undefined);
               }}
             >
-              <option value="openrouter">OpenRouter</option>
-              <option value="ollama">Ollama</option>
-              <option value="openai-compatible">OpenAI-compatible</option>
+              {connections.map(connection => (
+                <option value={connection.provider} key={connection.provider}>
+                  {providerLabels[connection.provider]}
+                </option>
+              ))}
             </select>
           </label>
           <label>Model
@@ -873,23 +929,35 @@ function AddAgent({ roomId, onAdded, onClose }: {
             />
           </label>
         </div>
-        <label>System prompt
-          <textarea
-            name="systemPrompt"
-            value={draft.systemPrompt}
-            onChange={event => update("systemPrompt", event.target.value)}
-            rows={4}
-          />
-        </label>
-        <label>Persona prompt
-          <textarea
-            value={draft.personaPrompt ?? ""}
-            onChange={event => update("personaPrompt", event.target.value)}
-            rows={2}
-            placeholder="Short stylistic direction for this voice."
-          />
-        </label>
-        <div className="field-row">
+        {draft.provider === "psfn" ? (
+          <div className="psfn-persona-notice">
+            <strong>Remote companion identity</strong>
+            <span>PSFN supplies this participant’s persona, system prompt, faculties, memory, and reasoning behavior. The room sends only new public events and bounded shared-table evidence.</span>
+            {!fallbackAvailable && (
+              <span>Auto activation is unavailable until a stateless fallback model is selected in Settings. Direct @mentions and manual Invite still work.</span>
+            )}
+          </div>
+        ) : (
+          <>
+            <label>System prompt
+              <textarea
+                name="systemPrompt"
+                value={draft.systemPrompt}
+                onChange={event => update("systemPrompt", event.target.value)}
+                rows={4}
+              />
+            </label>
+            <label>Persona prompt
+              <textarea
+                value={draft.personaPrompt ?? ""}
+                onChange={event => update("personaPrompt", event.target.value)}
+                rows={2}
+                placeholder="Short stylistic direction for this voice."
+              />
+            </label>
+          </>
+        )}
+        {draft.provider !== "psfn" && <div className="field-row">
           <label>Reasoning level
             <select
               value={draft.reasoning.enabled ? draft.reasoning.effort ?? "medium" : "off"}
@@ -942,7 +1010,7 @@ function AddAgent({ roomId, onAdded, onClose }: {
               <option value="hidden">Hidden</option>
             </select>
           </label>
-        </div>
+        </div>}
         {draft.reasoning.enabled && capabilities && !capabilities.reasoningInputControl && (
           <small className="field-error">
             This model does not advertise reasoning controls; the provider may ignore this level.
@@ -987,10 +1055,24 @@ function ParticipantsPanel({
   const [pressureClock, setPressureClock] = useState(() => Date.now());
   const [confirmingRemovalId, setConfirmingRemovalId] = useState<string>();
   const [removingId, setRemovingId] = useState<string>();
+  const [providerConnections, setProviderConnections] = useState<ProviderConnectionStatus[]>([]);
   useEffect(() => {
     const timer = window.setInterval(() => setPressureClock(Date.now()), 15_000);
     return () => window.clearInterval(timer);
   }, []);
+  useEffect(() => {
+    if (!snapshot.agents.some(agent => agent.provider === "psfn")) {
+      setProviderConnections([]);
+      return;
+    }
+    let active = true;
+    void api.listProviderConnections().then(connections => {
+      if (active) setProviderConnections(connections);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [snapshot.agents]);
   const currentPressure = roomPressure(snapshot.messages, pressureClock);
   const pressurePercent = roomPressurePercent(snapshot.messages, pressureClock);
   return (
@@ -1014,6 +1096,15 @@ function ParticipantsPanel({
           const libraryCount = snapshot.artifacts.filter(
             artifact => artifact.ownerAgentId === agent.id
           ).length;
+          const psfnDelivery = snapshot.psfnDeliveries?.find(delivery =>
+            delivery.agentId === agent.id
+          );
+          const psfnConnectionState = agent.provider === "psfn"
+            ? providerConnections.find(connection => connection.provider === "psfn")?.connectionState
+            : undefined;
+          const psfnStatus = psfnConnectionState === "identity-drift"
+            ? "identity drift"
+            : psfnDelivery?.deliveryStatus ?? psfnConnectionState ?? "connected";
           return (
             <div className="participant" key={agent.id}>
               <div className="participant-head">
@@ -1023,6 +1114,11 @@ function ParticipantsPanel({
                 <div>
                   <strong>{agent.name}</strong>
                   <span>{agent.modelId.split("/").at(-1)}</span>
+                  {agent.provider === "psfn" && (
+                    <span className={`psfn-participant-badge ${psfnConnectionState === "identity-drift" ? "ambiguous" : psfnDelivery?.deliveryStatus ?? "idle"}`}>
+                      Remote PSFN companion · {psfnStatus}
+                    </span>
+                  )}
                 </div>
                 <span className={`presence ${generating ? "speaking" : ""}`} />
               </div>
@@ -1100,6 +1196,20 @@ function ParticipantsPanel({
                   <Mic2 size={13} /> Invite
                 </button>
               </div>
+              {psfnDelivery?.deliveryStatus === "ambiguous" && (
+                <div className="psfn-delivery-actions" role="group" aria-label="Resolve uncertain PSFN delivery">
+                  <strong>Delivery outcome is uncertain</strong>
+                  <button onClick={() => onAction(() =>
+                    api.resolvePsfnDelivery(snapshot.room.id, agent.id, "assume-delivered")
+                  )}>Assume delivered</button>
+                  <button onClick={() => onAction(() =>
+                    api.resolvePsfnDelivery(snapshot.room.id, agent.id, "retry-possible-duplicate")
+                  )}>Allow retry (may duplicate)</button>
+                  <button onClick={() => onAction(() =>
+                    api.resolvePsfnDelivery(snapshot.room.id, agent.id, "send-resynchronization-summary")
+                  )}>Send resynchronization summary</button>
+                </div>
+              )}
               {confirmingRemovalId === agent.id && (
                 <div className="participant-remove-confirmation" role="group" aria-label={`Remove ${agent.name}?`}>
                   <span>Remove from this room?</span>
@@ -1720,7 +1830,11 @@ export default function App() {
               <span>{snapshot.room.settings.maxAutonomousWaves} wave cap</span>
               {confirmingChatReset ? (
                 <div className="chat-reset-confirmation" role="group" aria-label="Reset chat?">
-                  <span>Clear chat, keep voices and files?</span>
+                  <span>
+                    Clear chat, keep voices and files?
+                    {snapshot.agents.some(agent => agent.provider === "psfn") &&
+                      " PSFN’s remote history and memory will remain intact."}
+                  </span>
                   <button
                     type="button"
                     className="secondary-button"

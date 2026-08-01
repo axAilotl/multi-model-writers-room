@@ -3,7 +3,11 @@ import type {
   NormalizedChatRequest,
   NormalizedGenerationEvent
 } from "@writers-room/contracts";
-import type { ModelDescriptor, ModelProvider } from "./model-provider.js";
+import {
+  statelessModelExecution,
+  type ModelDescriptor,
+  type ModelProvider
+} from "./model-provider.js";
 import { OpenAiCompatibleProvider } from "./openai-compatible.js";
 
 interface OllamaShowResponse {
@@ -25,6 +29,7 @@ function nativeContextLength(payload: OllamaShowResponse): number | undefined {
 
 class OllamaProvider implements ModelProvider {
   readonly id = "ollama";
+  readonly execution = statelessModelExecution;
   private readonly compatible: OpenAiCompatibleProvider;
   private readonly fetcher: typeof fetch;
   private readonly nativeBaseUrl: string;
