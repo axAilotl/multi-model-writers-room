@@ -5,6 +5,7 @@ import type {
   DefaultModelSelection,
   ProviderConnectionStatus
 } from "@writers-room/contracts";
+import { PSFN_DEFAULT_CONTEXT_LENGTH } from "@writers-room/contracts";
 import { api } from "./api.js";
 import { providerLabels } from "./provider-labels.js";
 import {
@@ -44,7 +45,7 @@ export function ProviderSettings() {
   const [apiKey, setApiKey] = useState("");
   const [sessionMode, setSessionMode] = useState<"fixed" | "header">("header");
   const [expectedCompanionId, setExpectedCompanionId] = useState("");
-  const [contextLength, setContextLength] = useState(1_000_000);
+  const [contextLength, setContextLength] = useState(PSFN_DEFAULT_CONTEXT_LENGTH);
   const [allowInsecureHttp, setAllowInsecureHttp] = useState(false);
   const [defaultModel, setDefaultModel] = useState<DefaultModelSelection>();
   const [savingDefaultId, setSavingDefaultId] = useState<string>();
@@ -90,7 +91,7 @@ export function ProviderSettings() {
     setApiKey("");
     setSessionMode(connection?.sessionMode ?? "header");
     setExpectedCompanionId(connection?.expectedCompanionId ?? "");
-    setContextLength(connection?.contextLength ?? 1_000_000);
+    setContextLength(connection?.contextLength ?? PSFN_DEFAULT_CONTEXT_LENGTH);
     setAllowInsecureHttp(connection?.baseUrl?.startsWith("http://") ?? false);
     setConnectionSaved(false);
     setSettingsError(undefined);
@@ -316,7 +317,7 @@ export function ProviderSettings() {
                 <input
                   type="number"
                   min={4_096}
-                  max={1_000_000}
+                  max={PSFN_DEFAULT_CONTEXT_LENGTH}
                   value={contextLength}
                   onChange={event => setContextLength(Number(event.target.value))}
                 />

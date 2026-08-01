@@ -6,6 +6,8 @@ export const providerKinds = [
   "openai-compatible",
   "psfn"
 ] as const;
+
+export const PSFN_DEFAULT_CONTEXT_LENGTH = 1_000_000;
 export const providerKindSchema = z.enum(providerKinds);
 export type ProviderKind = z.infer<typeof providerKindSchema>;
 

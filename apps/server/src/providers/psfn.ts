@@ -5,6 +5,7 @@ import type {
   NormalizedGenerationEvent,
   StatefulParticipantTurnRequest
 } from "@writers-room/contracts";
+import { PSFN_DEFAULT_CONTEXT_LENGTH } from "@writers-room/contracts";
 import { renderPsfnEnvelope } from "../room/psfn-turn-assembler.js";
 import {
   statefulCompanionExecution,
@@ -226,7 +227,7 @@ function safeErrorMessage(
 }
 
 const PSFN_CAPABILITIES: ModelCapabilities = {
-  contextLength: 1_000_000,
+  contextLength: PSFN_DEFAULT_CONTEXT_LENGTH,
   textInput: true,
   imageInput: false,
   pdfInput: false,

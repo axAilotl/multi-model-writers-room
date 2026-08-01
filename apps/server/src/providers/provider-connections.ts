@@ -1,4 +1,5 @@
 import {
+  PSFN_DEFAULT_CONTEXT_LENGTH,
   providerConnectionStatusSchema,
   providerConnectionUpdateSchema,
   providerKinds,
@@ -93,7 +94,9 @@ function environmentConfigurations(environment: Environment, psfnEnabled: boolea
   if (psfnUrl) {
     const psfnKey = optionalSecret(environment.PSFN_API_KEY);
     const expectedCompanionId = optionalSecret(environment.PSFN_EXPECTED_COMPANION_ID);
-    const parsedContextLength = Number(environment.PSFN_CONTEXT_LENGTH ?? 1_000_000);
+    const parsedContextLength = Number(
+      environment.PSFN_CONTEXT_LENGTH ?? PSFN_DEFAULT_CONTEXT_LENGTH
+    );
     const allowInsecureHttp = environment.PSFN_ALLOW_INSECURE_HTTP === "true";
     configurations.set("psfn", {
       provider: "psfn",
@@ -102,8 +105,8 @@ function environmentConfigurations(environment: Environment, psfnEnabled: boolea
       sessionMode: environment.PSFN_SESSION_MODE === "fixed" ? "fixed" : "header",
       ...(expectedCompanionId === undefined ? {} : { expectedCompanionId }),
       contextLength: Number.isInteger(parsedContextLength) && parsedContextLength >= 4_096
-        ? Math.min(parsedContextLength, 1_000_000)
-        : 1_000_000,
+        ? Math.min(parsedContextLength, PSFN_DEFAULT_CONTEXT_LENGTH)
+        : PSFN_DEFAULT_CONTEXT_LENGTH,
       allowInsecureHttp
     });
     sources.set("psfn", "environment");
@@ -401,7 +404,7 @@ export class ProviderConnectionManager {
           remoteCompanionId: identity.companionId,
           remoteCompanionName: identity.companionName
         }),
-        contextLength: effective?.contextLength ?? 1_000_000,
+        contextLength: effective?.contextLength ?? PSFN_DEFAULT_CONTEXT_LENGTH,
         connectionState: psfnProvider?.connectionState ??
           (this.providers.has(provider) ? "untested" : "unconfigured")
       })
