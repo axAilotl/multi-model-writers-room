@@ -6,6 +6,7 @@ import type {
   RoomSettings,
   RoomSnapshot,
   VoiceTemplate,
+  VoiceTemplateLibraryItem,
   VoiceTemplateInput,
   VoiceTemplatePatch,
   VoiceTemplateGenerationRequest,
@@ -132,6 +133,40 @@ export const api = {
     );
   },
 
+  async listVoiceTemplateLibrary(
+    templateId: string
+  ): Promise<VoiceTemplateLibraryItem[]> {
+    return (await requestJson<{ items?: VoiceTemplateLibraryItem[] }>(
+      `/api/v1/voice-templates/${encodeURIComponent(templateId)}/library`
+    )).items ?? [];
+  },
+
+  async uploadVoiceTemplateReference(
+    templateId: string,
+    file: File
+  ): Promise<VoiceTemplateLibraryItem> {
+    const body = new FormData();
+    body.append("file", file);
+    return (await requestJson<{ item: VoiceTemplateLibraryItem }>(
+      `/api/v1/voice-templates/${encodeURIComponent(templateId)}/library`,
+      {
+        method: "POST",
+        body,
+        signal: AbortSignal.timeout(INGESTION_TIMEOUT_MS)
+      }
+    )).item;
+  },
+
+  async deleteVoiceTemplateReference(
+    templateId: string,
+    itemId: string
+  ): Promise<void> {
+    await requestJson(
+      `/api/v1/voice-templates/${encodeURIComponent(templateId)}/library/${encodeURIComponent(itemId)}`,
+      { method: "DELETE" }
+    );
+  },
+
   async listRooms(): Promise<Room[]> {
     return (await requestJson<{ rooms: Room[] }>("/api/v1/rooms")).rooms;
   },
@@ -187,18 +222,29 @@ export const api = {
   sendMessage(
     roomId: string,
     content: string,
-    mentionedAgentIds: string[]
+    mentionedAgentIds: string[],
+    replyToMessageId?: string
   ): Promise<unknown> {
     return requestJson(`/api/v1/rooms/${roomId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content, mentionedAgentIds })
+      body: JSON.stringify({
+        content,
+        mentionedAgentIds,
+        ...(replyToMessageId === undefined ? {} : { replyToMessageId })
+      })
     });
   },
 
-  selectSpeaker(roomId: string, agentId: string): Promise<unknown> {
+  selectSpeaker(
+    roomId: string,
+    agentId: string,
+    targetMessageId?: string
+  ): Promise<unknown> {
     return requestJson(`/api/v1/rooms/${roomId}/speakers/${agentId}`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(
+        targetMessageId === undefined ? {} : { targetMessageId }
+      ),
       signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS)
     });
   },
@@ -210,14 +256,40 @@ export const api = {
     });
   },
 
-  async upload(roomId: string, file: File): Promise<void> {
+  async upload(
+    roomId: string,
+    file: File,
+    ownerAgentId?: string
+  ): Promise<WorkspaceArtifact> {
     const body = new FormData();
     body.set("file", file);
-    await requestJson(`/api/v1/rooms/${roomId}/artifacts`, {
+    if (ownerAgentId !== undefined) body.set("ownerAgentId", ownerAgentId);
+    return (await requestJson<{ artifact: WorkspaceArtifact }>(
+      `/api/v1/rooms/${roomId}/artifacts`, {
+      method: "POST",
+      body,
+      signal: AbortSignal.timeout(INGESTION_TIMEOUT_MS)
+      }
+    )).artifact;
+  },
+
+  async uploadRepository(
+    roomId: string,
+    files: File[]
+  ): Promise<{ imported: number; failures: Array<{ path: string; error: string }> }> {
+    const body = new FormData();
+    const paths = files.map(file => file.webkitRelativePath || file.name);
+    for (const file of files) body.append("files", file, file.name);
+    body.set("paths", JSON.stringify(paths));
+    const result = await requestJson<{
+      artifacts: WorkspaceArtifact[];
+      failures: Array<{ path: string; error: string }>;
+    }>(`/api/v1/rooms/${roomId}/repositories`, {
       method: "POST",
       body,
       signal: AbortSignal.timeout(INGESTION_TIMEOUT_MS)
     });
+    return { imported: result.artifacts.length, failures: result.failures };
   },
 
   async retryArtifact(roomId: string, artifactId: string): Promise<WorkspaceArtifact> {

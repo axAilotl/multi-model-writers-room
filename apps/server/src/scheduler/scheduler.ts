@@ -36,6 +36,7 @@ export interface SchedulerResult {
     | "silence"
     | "paused"
     | "pressure"
+    | "interjection_queued"
     | "continuation_disabled";
 }
 
@@ -68,6 +69,7 @@ function deterministicJitter(agentId: string, amount: number): number {
 
 export class ConversationScheduler {
   private readonly activeRooms = new Set<string>();
+  private readonly pendingHumanMessages = new Map<string, string[]>();
 
   constructor(private readonly dependencies: {
     store: RoomStore;
@@ -80,11 +82,28 @@ export class ConversationScheduler {
     roomId: string,
     messageId: string
   ): Promise<SchedulerResult> {
-    if (this.activeRooms.has(roomId)) throw new Error("Scheduler is already active for room");
+    if (this.activeRooms.has(roomId)) {
+      const pending = this.pendingHumanMessages.get(roomId) ?? [];
+      pending.push(messageId);
+      this.pendingHumanMessages.set(roomId, pending);
+      return { waves: 0, replies: 0, stopReason: "interjection_queued" };
+    }
     this.activeRooms.add(roomId);
     try {
-      return await this.run(roomId, messageId);
+      let nextMessageId = messageId;
+      let result: SchedulerResult;
+      do {
+        result = await this.run(roomId, nextMessageId);
+        const pending = this.pendingHumanMessages.get(roomId);
+        const nextPendingMessage = pending?.shift();
+        if (nextPendingMessage === undefined) return result;
+        if (pending && pending.length === 0) {
+          this.pendingHumanMessages.delete(roomId);
+        }
+        nextMessageId = nextPendingMessage;
+      } while (true);
     } finally {
+      this.pendingHumanMessages.delete(roomId);
       this.activeRooms.delete(roomId);
     }
   }
@@ -109,7 +128,11 @@ export class ConversationScheduler {
       const mentioned = new Set(trigger.mentionedAgentIds);
       const directHumanTargets = trigger.authorType === "human" && mentioned.size > 0;
       const pressure = assessRoomPressure(snapshot.messages, this.now());
-      if (pressure.hardSuppressed && mentioned.size === 0) {
+      if (
+        pressure.hardSuppressed &&
+        mentioned.size === 0 &&
+        snapshot.room.settings.conversationStyle !== "hollywood"
+      ) {
         return { waves, replies, stopReason: "pressure" };
       }
       const candidates = await Promise.all(snapshot.agents.map(async agent => {
@@ -139,15 +162,23 @@ export class ConversationScheduler {
             eventMessage: trigger
           });
         } catch {
-          if (!directlyMentioned) return undefined;
-          decision = {
-            shouldRespond: true,
-            urgency: 1,
-            confidence: 1,
-            targetMessageId: trigger.id,
-            intendedMove: "answer",
-            reason: "Direct mention override after activation failure"
-          };
+          decision = directlyMentioned
+            ? {
+                shouldRespond: true,
+                urgency: 1,
+                confidence: 1,
+                targetMessageId: trigger.id,
+                intendedMove: "answer",
+                reason: "Direct mention override after activation failure"
+              }
+            : {
+                shouldRespond: false,
+                urgency: 0,
+                confidence: 0,
+                targetMessageId: trigger.id,
+                intendedMove: "defer",
+                reason: "Activation evaluation failed"
+              };
         }
         const recentSpeakerPenalty = runtime.consecutiveTurns > 0 ? 0.15 : 0;
         const score =
@@ -158,21 +189,59 @@ export class ConversationScheduler {
           deterministicJitter(agent.id, snapshot.room.settings.jitter) -
           effectiveFatigue(runtime, directlyMentioned) * 0.4 -
           recentSpeakerPenalty -
-          pressure.thresholdBias;
+          pressure.thresholdBias * (
+            snapshot.room.settings.conversationStyle === "hollywood" ? 0.25 : 1
+          );
         this.dependencies.store.appendRoomEvent(roomId, {
           type: "activation.recorded",
           agentId: agent.id,
           decision,
-          score
+          score,
+          source: "participant"
         });
-        if (!directlyMentioned && !decision.shouldRespond) {
-          return undefined;
-        }
         return { agent, decision, score, directlyMentioned } satisfies ScoredCandidate;
       }));
+      const evaluated = candidates
+        .filter((candidate): candidate is ScoredCandidate => candidate !== undefined);
+      let selectionPool = evaluated.filter(candidate =>
+        candidate.directlyMentioned || candidate.decision.shouldRespond
+      );
+      if (selectionPool.length === 0 && trigger.authorType === "human") {
+        const fallback = arbitrateSpeakers({
+          candidates: evaluated.map(candidate => ({
+            value: candidate,
+            agentId: candidate.agent.id,
+            directlyMentioned: candidate.directlyMentioned
+          })),
+          messages: snapshot.messages,
+          limit: 1
+        }).at(0);
+        if (fallback) {
+          const admitted = {
+            ...fallback,
+            decision: {
+              ...fallback.decision,
+              shouldRespond: true,
+              urgency: Math.max(0.5, fallback.decision.urgency),
+              targetMessageId: trigger.id,
+              intendedMove: fallback.decision.intendedMove === "defer"
+                ? "answer" as const
+                : fallback.decision.intendedMove,
+              reason: "Automatic conversation selected one response to the human event"
+            }
+          } satisfies ScoredCandidate;
+          this.dependencies.store.appendRoomEvent(roomId, {
+            type: "activation.recorded",
+            agentId: admitted.agent.id,
+            decision: admitted.decision,
+            score: admitted.score,
+            source: "scheduler"
+          });
+          selectionPool = [admitted];
+        }
+      }
       const selected = arbitrateSpeakers({
-        candidates: candidates
-          .filter((candidate): candidate is ScoredCandidate => candidate !== undefined)
+        candidates: selectionPool
           .map(candidate => ({
             value: candidate,
             agentId: candidate.agent.id,
@@ -195,13 +264,19 @@ export class ConversationScheduler {
         return { waves, replies, stopReason: "silence" };
       }
 
-      const settled = await Promise.allSettled(currentSelection.map(candidate =>
-        this.dependencies.generator.generate({
+      const settled = await Promise.allSettled(currentSelection.map(candidate => {
+        const requestedTarget = candidate.decision.targetMessageId;
+        const targetMessageId = requestedTarget !== undefined && snapshot.messages.some(
+          message => message.id === requestedTarget && message.lifecycle === "active"
+        )
+          ? requestedTarget
+          : trigger.id;
+        return this.dependencies.generator.generate({
           roomId,
           agentId: candidate.agent.id,
-          targetMessageId: candidate.decision.targetMessageId ?? trigger.id
-        })
-      ));
+          targetMessageId
+        });
+      }));
       const outputs = settled.flatMap(result =>
         result.status === "fulfilled" ? [result.value] : []
       );
@@ -213,6 +288,12 @@ export class ConversationScheduler {
       replies += settled.length;
       this.applyWaveFatigue(roomId, outputs);
       triggerMessageId = outputs.at(-1)!.message.id;
+
+      // A human interruption supersedes further agent-to-agent continuation.
+      // Finish the in-flight wave, then return control to the outer FIFO.
+      if ((this.pendingHumanMessages.get(roomId)?.length ?? 0) > 0) {
+        return { waves, replies, stopReason: "interjection_queued" };
+      }
 
       if (waves >= snapshot.room.settings.maxAutonomousWaves) {
         return { waves, replies, stopReason: "wave_cap" };

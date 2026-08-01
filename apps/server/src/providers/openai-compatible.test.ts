@@ -29,7 +29,14 @@ describe("OpenAI-compatible provider seam", () => {
               "reasoning",
               "structured_outputs",
               "prompt_cache_key"
-            ]
+            ],
+            reasoning: {
+              supported_efforts: ["high", "medium", "low", "invalid"],
+              default_effort: "medium",
+              default_enabled: true,
+              supports_max_tokens: true,
+              mandatory: false
+            }
           }
         ]
       }),
@@ -54,6 +61,13 @@ describe("OpenAI-compatible provider seam", () => {
           reasoningInputControl: true,
           reasoningOutput: true,
           promptCaching: true
+        },
+        reasoning: {
+          supportedEfforts: ["high", "medium", "low"],
+          defaultEffort: "medium",
+          defaultEnabled: true,
+          supportsMaxTokens: true,
+          mandatory: false
         }
       }
     ]);

@@ -276,6 +276,11 @@ try {
   );
 
   await page.getByRole("button", { name: "New template" }).click();
+  const autoContext = page.getByLabel("Auto-scale to model context");
+  assert.equal(await autoContext.isChecked(), true, "New voices did not default to model-aware context");
+  await page.getByText(
+    /256k working · 256k hard · compact chat at 90k/
+  ).waitFor();
   await page.getByLabel("Template title").fill("Browser Product Critic");
   await page.getByLabel("Voice name").fill("Browser Critic");
   await page.getByLabel("Point of view").fill("Challenges unsupported product assumptions.");
@@ -333,6 +338,68 @@ try {
   await page.getByRole("button", { name: "Add participant" }).click();
   await page.locator(".participant").filter({ hasText: "Browser Architect" }).waitFor();
   assert.equal(await page.locator(".participant").count(), 2);
+  const modeSelect = page.locator(".compact-select select");
+  assert.deepEqual(
+    await modeSelect.locator("option").allTextContents(),
+    ["Workshop", "Writers’ Room", "Shark Tank", "Fishbowl"]
+  );
+  await modeSelect.selectOption("hollywood");
+  await waitForCondition(
+    () => runtime.store.getRoom(workspaceRoom.id).settings.conversationStyle === "hollywood",
+    "Writers’ Room mode did not persist"
+  );
+  assert.equal(runtime.store.getRoom(workspaceRoom.id).settings.maxResponders, 3);
+  await modeSelect.selectOption("deep-study");
+  await waitForCondition(
+    () => runtime.store.getRoom(workspaceRoom.id).settings.conversationStyle === "deep-study",
+    "Fishbowl mode did not persist"
+  );
+  assert.equal(runtime.store.getRoom(workspaceRoom.id).settings.deliberationTurns, 3);
+  await modeSelect.selectOption("conversation");
+  await waitForCondition(
+    () => runtime.store.getRoom(workspaceRoom.id).settings.conversationStyle === "conversation",
+    "Workshop mode did not persist"
+  );
+
+  const architectParticipant = page.locator(".participant").filter({
+    hasText: "Browser Architect"
+  });
+  await architectParticipant.locator(".participant-library input").setInputFiles({
+    name: "architect-interview.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# Interview\nThe architect treats failure modes as design inputs.")
+  });
+  await architectParticipant.getByText("Library (1)", { exact: true }).waitFor({
+    timeout: 30_000
+  });
+  const architectAgent = runtime.store.getSnapshot(workspaceRoom.id).agents.find(
+    agent => agent.name === "Browser Architect"
+  );
+  assert.ok(architectAgent, "Architect participant was not persisted");
+  await waitForCondition(
+    () => runtime.store.getSnapshot(workspaceRoom.id).artifacts.some(artifact =>
+      artifact.ownerAgentId === architectAgent.id &&
+      artifact.sourceType === "persona-memory"
+    ),
+    "Private participant library upload was not persisted"
+  );
+
+  const repositoryFixture = join(dataRoot, "repository-fixture");
+  await mkdir(repositoryFixture, { recursive: true });
+  await writeFile(
+    join(repositoryFixture, "speaker-router.ts"),
+    "export const routeSpeaker = () => 'balanced';"
+  );
+  await page.locator('label[title="Add repository folder"] input')
+    .setInputFiles(repositoryFixture);
+  await page.locator(".artifact").filter({ hasText: "speaker-router.ts" })
+    .getByText("repository · ready", { exact: true }).waitFor({ timeout: 30_000 });
+  assert.ok(
+    runtime.store.getSnapshot(workspaceRoom.id).artifacts.some(artifact =>
+      artifact.sourceType === "repository" && artifact.filename.endsWith("speaker-router.ts")
+    ),
+    "Repository directory upload was not persisted"
+  );
   const roomComposer = page.getByRole("textbox", { name: "Room message" });
   assert.equal(await roomComposer.getAttribute("autocomplete"), "off");
   assert.notEqual(
@@ -350,6 +417,20 @@ try {
 
   await page.getByRole("button", { name: "Open settings" }).click();
   await page.getByRole("button", { name: "Voice templates" }).click();
+  await page.locator(".template-list button").filter({
+    hasText: "Browser Architect"
+  }).click();
+  const managedReference = page.locator(".voice-library-item").filter({
+    hasText: "architect-interview.md"
+  });
+  await managedReference.waitFor();
+  await managedReference.getByRole("button", {
+    name: "Delete architect-interview.md"
+  }).click();
+  await managedReference.getByRole("group", {
+    name: "Delete architect-interview.md?"
+  }).getByRole("button", { name: "Confirm" }).click();
+  await managedReference.waitFor({ state: "detached" });
   await page.locator(".template-list button").filter({
     hasText: "Browser Product Critic"
   }).click();
@@ -477,7 +558,6 @@ try {
     "Streaming evidence:"
   );
   assert.match(completedReply, /^## Architecture finding/);
-
   await page.getByRole("button", {
     name: "Remove Browser Reviewer from room"
   }).click();
@@ -503,6 +583,23 @@ try {
     "Room pressure did not reset after deleting the last agent message"
   );
 
+  const replyTarget = runtime.store.getSnapshot(browserRoom.id).messages.find(message =>
+    message.authorType === "human" && message.content === markdownPrompt
+  );
+  assert.ok(replyTarget, "Could not identify the browser reply target");
+  await markdownMessage.getByRole("button", { name: "Reply", exact: true }).click();
+  await page.locator(".composer-reply-context").filter({
+    hasText: "Replying to your message"
+  }).waitFor();
+  const directReplyText = "This human reply should retain its exact target.";
+  await page.getByRole("textbox", { name: "Room message" }).fill(directReplyText);
+  await page.getByRole("textbox", { name: "Room message" }).press("Enter");
+  await page.locator(".human-message").filter({ hasText: directReplyText }).waitFor();
+  const persistedReply = runtime.store.getSnapshot(browserRoom.id).messages.find(
+    message => message.content === directReplyText
+  );
+  assert.equal(persistedReply?.replyToMessageId, replyTarget.id);
+
   await page.getByRole("button", { name: "Reset chat" }).click();
   await page.getByRole("group", { name: "Reset chat?" })
     .getByRole("button", { name: "Confirm reset" }).click();
@@ -517,7 +614,7 @@ try {
   assert.equal(resetSnapshot.messages.length, 0, "Reset did not clear persisted messages");
   assert.equal(resetSnapshot.generations.length, 0, "Reset did not clear generations");
   assert.equal(resetSnapshot.agents.length, 1, "Reset did not retain participants");
-  assert.equal(resetSnapshot.artifacts.length, 1, "Reset did not retain artifacts");
+  assert.equal(resetSnapshot.artifacts.length, 2, "Reset did not retain artifacts");
 
   await page.getByRole("button", { name: "Manage rooms" }).click();
   await page.getByRole("button", { name: "Switch to Archive room" }).click();
@@ -541,12 +638,18 @@ try {
   console.log(JSON.stringify({
     ok: true,
     templatesSaved: 2,
+    modelAwareContextBudget: true,
     participantsAdded: 2,
     participantsRemoved: 1,
+    roomModesConfigured: 4,
+    personaLibraryUploaded: true,
+    voiceReferenceManagedInSettings: true,
+    repositoryDirectoryUploaded: true,
     composerIgnoredByPasswordManagers: true,
     requiredFieldWarning: true,
     settingsAvailableDuringGeneration: true,
     realConversationCompleted: true,
+    explicitMessageReplyPersisted: true,
     roomsCreated: 2,
     roomSwitchSurvivedPriorGeneration: true,
     roomsDeleted: 1,

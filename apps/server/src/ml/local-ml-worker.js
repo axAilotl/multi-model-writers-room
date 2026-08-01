@@ -6,6 +6,7 @@ let embeddingPipeline;
 let summaryPipeline;
 let transformers;
 let queue = Promise.resolve();
+const cancelled = new Set();
 
 async function library() {
   transformers ??= await import("@huggingface/transformers");
@@ -89,12 +90,19 @@ async function dispatch(message) {
 }
 
 parentPort.on("message", message => {
+  if (message.type === "cancel") {
+    cancelled.add(message.targetId);
+    return;
+  }
   queue = queue
     .then(async () => {
+      if (cancelled.delete(message.id)) return;
       try {
         const result = await dispatch(message);
+        if (cancelled.delete(message.id)) return;
         parentPort.postMessage({ id: message.id, ok: true, result });
       } catch (error) {
+        if (cancelled.delete(message.id)) return;
         parentPort.postMessage({
           id: message.id,
           ok: false,

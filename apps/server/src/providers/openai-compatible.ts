@@ -1,7 +1,8 @@
 import type {
   ModelCapabilities,
   NormalizedChatRequest,
-  NormalizedGenerationEvent
+  NormalizedGenerationEvent,
+  ReasoningEffort
 } from "@writers-room/contracts";
 import type { ModelDescriptor, ModelProvider } from "./model-provider.js";
 
@@ -40,6 +41,43 @@ interface StreamDelta {
     completion_tokens?: number;
     cost?: number;
     completion_tokens_details?: { reasoning_tokens?: number };
+  };
+}
+
+const reasoningEfforts = new Set<ReasoningEffort | "none">([
+  "none", "minimal", "low", "medium", "high", "xhigh", "max"
+]);
+
+function parseReasoningControls(value: {
+  supported_efforts?: string[] | null;
+  default_effort?: string;
+  default_enabled?: boolean;
+  supports_max_tokens?: boolean;
+  mandatory?: boolean;
+} | undefined): ModelDescriptor["reasoning"] {
+  if (!value) return undefined;
+  const supportedEfforts = value.supported_efforts === null
+    ? null
+    : value.supported_efforts?.filter(
+      (effort): effort is ReasoningEffort | "none" => reasoningEfforts.has(
+        effort as ReasoningEffort | "none"
+      )
+    );
+  const defaultEffort = value.default_effort && reasoningEfforts.has(
+    value.default_effort as ReasoningEffort | "none"
+  )
+    ? value.default_effort as ReasoningEffort | "none"
+    : undefined;
+  return {
+    ...(supportedEfforts === undefined ? {} : { supportedEfforts }),
+    ...(defaultEffort === undefined ? {} : { defaultEffort }),
+    ...(value.default_enabled === undefined
+      ? {}
+      : { defaultEnabled: value.default_enabled }),
+    ...(value.supports_max_tokens === undefined
+      ? {}
+      : { supportsMaxTokens: value.supports_max_tokens }),
+    ...(value.mandatory === undefined ? {} : { mandatory: value.mandatory })
   };
 }
 
@@ -269,17 +307,28 @@ export class OpenAiCompatibleProvider implements ModelProvider {
         architecture?: {
           input_modalities?: string[];
         };
+        reasoning?: {
+          supported_efforts?: string[] | null;
+          default_effort?: string;
+          default_enabled?: boolean;
+          supports_max_tokens?: boolean;
+          mandatory?: boolean;
+        };
       }>;
     };
-    return (payload.data ?? []).map(model => ({
-      id: model.id,
-      name: model.name ?? model.id,
-      capabilities: this.overrides[model.id] ?? capabilitiesFromParameters(
-        model.context_length ?? 32_768,
-        model.supported_parameters ?? [],
-        model.architecture?.input_modalities ?? ["text"]
-      )
-    }));
+    return (payload.data ?? []).map(model => {
+      const reasoning = parseReasoningControls(model.reasoning);
+      return {
+        id: model.id,
+        name: model.name ?? model.id,
+        capabilities: this.overrides[model.id] ?? capabilitiesFromParameters(
+          model.context_length ?? 32_768,
+          model.supported_parameters ?? [],
+          model.architecture?.input_modalities ?? ["text"]
+        ),
+        ...(reasoning === undefined ? {} : { reasoning })
+      };
+    });
   }
 
   async getCapabilities(modelId: string): Promise<ModelCapabilities | undefined> {

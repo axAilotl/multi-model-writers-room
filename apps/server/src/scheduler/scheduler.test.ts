@@ -43,6 +43,188 @@ afterEach(() => {
 });
 
 describe("conversation scheduler seam", () => {
+  it("queues a human interjection while an autonomous run is active", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-interjection-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({
+      title: "Interruptible room",
+      settings: { maxResponders: 1, maxAutonomousWaves: 8 }
+    });
+    store.addAgent(room.id, agent("alpha"));
+    const first = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Start with the first idea."
+    });
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    let generationCount = 0;
+    const scheduler = new ConversationScheduler({
+      store,
+      evaluator: {
+        evaluate: async ({ eventMessage }) => ({
+          shouldRespond: eventMessage.authorType === "human",
+          urgency: 1,
+          confidence: 1,
+          intendedMove: eventMessage.authorType === "human" ? "answer" : "defer"
+        })
+      },
+      generator: {
+        generate: async input => {
+          generationCount += 1;
+          if (generationCount === 1) await firstBlocked;
+          const message = store.appendMessage({
+            roomId: input.roomId,
+            authorType: "agent",
+            authorId: input.agentId,
+            content: `Response ${generationCount}`,
+            ...(input.targetMessageId ? { replyToMessageId: input.targetMessageId } : {})
+          });
+          return {
+            message,
+            generation: {
+              id: `generation-${generationCount}`,
+              roomId: input.roomId,
+              messageId: message.id,
+              agentId: input.agentId,
+              provider: "openrouter",
+              requestedModelId: "fixture",
+              status: "complete",
+              finalText: message.content,
+              retrievedChunkIds: [],
+              outputTokens: 40,
+              startedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString()
+            }
+          };
+        }
+      }
+    });
+
+    const activeRun = scheduler.runFromHumanMessage(room.id, first.id);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const interjection = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Hold on—use this new direction."
+    });
+    await expect(scheduler.runFromHumanMessage(room.id, interjection.id))
+      .resolves.toMatchObject({ stopReason: "interjection_queued" });
+    const secondInterjection = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "One more constraint before you continue."
+    });
+    await expect(scheduler.runFromHumanMessage(room.id, secondInterjection.id))
+      .resolves.toMatchObject({ stopReason: "interjection_queued" });
+    releaseFirst();
+    await activeRun;
+
+    expect(generationCount).toBe(3);
+    const replies = store.listMessages(room.id).filter(message =>
+      message.authorType === "agent"
+    );
+    expect(replies.map(message => message.replyToMessageId)).toEqual([
+      first.id,
+      interjection.id,
+      secondInterjection.id
+    ]);
+    expect(store.listMessages(room.id).at(-1)).toMatchObject({
+      authorType: "agent",
+      replyToMessageId: secondInterjection.id
+    });
+    store.close();
+  });
+
+  it("links autonomous speakers to real messages across agent-to-agent waves", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-crosstalk-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({
+      title: "Crosstalk room",
+      settings: {
+        maxResponders: 1,
+        maxAutonomousWaves: 2,
+        maxAutonomousReplies: 2,
+        agentContinuation: true
+      }
+    });
+    store.addAgent(room.id, agent("alpha"));
+    store.addAgent(room.id, agent("beta"));
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Start a discussion about the architecture."
+    });
+    const evaluator: ActivationEvaluator = {
+      evaluate: async ({ agent: candidate, eventMessage }) => ({
+        shouldRespond: eventMessage.authorType === "human"
+          ? candidate.id === "alpha"
+          : candidate.id === "beta",
+        urgency: 0.9,
+        confidence: 0.9,
+        targetMessageId: eventMessage.authorType === "human"
+          ? "current"
+          : eventMessage.id,
+        intendedMove: eventMessage.authorType === "human" ? "answer" : "challenge"
+      })
+    };
+    let generationOrdinal = 0;
+    const generator: SpeakerGenerator = {
+      generate: async input => {
+        generationOrdinal += 1;
+        const message = store.appendMessage({
+          roomId: input.roomId,
+          authorType: "agent",
+          authorId: input.agentId,
+          content: `${input.agentId} contribution`,
+          ...(input.targetMessageId === undefined
+            ? {}
+            : { replyToMessageId: input.targetMessageId })
+        });
+        return {
+          message,
+          generation: {
+            id: `generation-${generationOrdinal}`,
+            roomId: input.roomId,
+            messageId: message.id,
+            agentId: input.agentId,
+            provider: "openrouter",
+            requestedModelId: "fixture",
+            status: "complete",
+            finalText: message.content,
+            retrievedChunkIds: [],
+            outputTokens: 60,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          }
+        };
+      }
+    };
+    const scheduler = new ConversationScheduler({ store, evaluator, generator });
+
+    const result = await scheduler.runFromHumanMessage(room.id, human.id);
+    const [, alphaMessage, betaMessage] = store.listMessages(room.id);
+
+    expect(result).toMatchObject({ waves: 2, replies: 2, stopReason: "wave_cap" });
+    expect(alphaMessage).toMatchObject({
+      authorId: "alpha",
+      replyToMessageId: human.id
+    });
+    expect(betaMessage).toMatchObject({
+      authorId: "beta",
+      replyToMessageId: alphaMessage!.id
+    });
+    store.close();
+  });
+
   it("admits a willing participant even when its ranking score is below the old cutoff", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-willing-candidate-"));
     roots.push(root);
@@ -102,6 +284,74 @@ describe("conversation scheduler seam", () => {
 
     expect(result).toMatchObject({ waves: 1, replies: 1, stopReason: "wave_cap" });
     expect(spoken).toEqual(["alpha"]);
+    store.close();
+  });
+
+  it("guarantees one eligible response to a human event when auto scheduling is running", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-human-fallback-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({
+      title: "Human response room",
+      settings: { maxResponders: 2, maxAutonomousWaves: 1 }
+    });
+    store.addAgent(room.id, agent("alpha"));
+    store.addAgent(room.id, agent("beta"));
+    const human = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "I expect the room to pick a speaker automatically."
+    });
+    const evaluator: ActivationEvaluator = {
+      evaluate: async () => ({
+        shouldRespond: false,
+        urgency: 0.1,
+        confidence: 0.8,
+        intendedMove: "defer",
+        reason: "Would otherwise stay silent"
+      })
+    };
+    const spoken: string[] = [];
+    const generator: SpeakerGenerator = {
+      generate: async input => {
+        spoken.push(input.agentId);
+        const message = store.appendMessage({
+          roomId: input.roomId,
+          authorType: "agent",
+          authorId: input.agentId,
+          content: "The room selected me.",
+          ...(input.targetMessageId === undefined
+            ? {}
+            : { replyToMessageId: input.targetMessageId })
+        });
+        return {
+          message,
+          generation: {
+            id: "generation-fallback",
+            roomId: input.roomId,
+            messageId: message.id,
+            agentId: input.agentId,
+            provider: "openrouter",
+            requestedModelId: "fixture",
+            status: "complete",
+            finalText: message.content,
+            retrievedChunkIds: [],
+            outputTokens: 40,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          }
+        };
+      }
+    };
+    const scheduler = new ConversationScheduler({ store, evaluator, generator });
+
+    await scheduler.runFromHumanMessage(room.id, human.id);
+
+    expect(spoken).toHaveLength(1);
+    expect(store.listMessages(room.id).at(-1)).toMatchObject({
+      replyToMessageId: human.id
+    });
     store.close();
   });
 
@@ -381,6 +631,7 @@ describe("conversation scheduler seam", () => {
     store.addAgent(room.id, agent("alpha"));
     store.updateRuntime(room.id, "alpha", {
       fatigue: 0.8,
+      muted: true,
       lastEvaluatedAt: new Date(now - 30 * 60_000).toISOString()
     });
     const human = store.appendMessage({

@@ -2,7 +2,8 @@ import { LoaderCircle, RefreshCw } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import type {
   AgentDefinition,
-  ModelCapabilities
+  ModelCapabilities,
+  ModelDescriptor
 } from "@writers-room/contracts";
 import {
   useFilteredModels,
@@ -14,12 +15,14 @@ export function ModelPicker({
   value,
   onChange,
   onCapabilities,
+  onModel,
   name = "modelId"
 }: {
   provider: AgentDefinition["provider"];
   value: string;
   onChange: (modelId: string) => void;
   onCapabilities?: (capabilities: ModelCapabilities | undefined) => void;
+  onModel?: (model: ModelDescriptor | undefined) => void;
   name?: string;
 }) {
   const listId = useId();
@@ -34,7 +37,8 @@ export function ModelPicker({
 
   useEffect(() => {
     onCapabilities?.(selected?.capabilities);
-  }, [selected, onCapabilities]);
+    onModel?.(selected);
+  }, [selected]);
 
   useEffect(() => {
     setActiveIndex(visible.length > 0 ? 0 : -1);
@@ -127,6 +131,10 @@ export function ModelPicker({
           {selected.capabilities.toolCalling && <span>tools</span>}
           {selected.capabilities.structuredOutput && <span>structured output</span>}
           {selected.capabilities.reasoningOutput && <span>reasoning</span>}
+          {selected.reasoning?.supportedEfforts && (
+            <span>{selected.reasoning.supportedEfforts.join(" / ")}</span>
+          )}
+          {selected.reasoning?.supportsMaxTokens && <span>reasoning budget</span>}
           {selected.capabilities.promptCaching && <span>prompt caching</span>}
           {!selected.capabilities.textInput && <span>no text input</span>}
         </div>

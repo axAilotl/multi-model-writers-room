@@ -5,12 +5,14 @@ import {
   CirclePause,
   CirclePlay,
   FileText,
+  FolderGit2,
   Gauge,
   LoaderCircle,
   MessageSquareText,
   Mic2,
   PanelLeft,
   Plus,
+  Reply,
   RotateCcw,
   Search,
   Send,
@@ -36,6 +38,7 @@ import type {
   AgentDefinition,
   GenerationRecord,
   ModelCapabilities,
+  ModelDescriptor,
   Room,
   RoomMessage,
   RoomSnapshot,
@@ -44,6 +47,7 @@ import type {
   WorkspaceSearchResult
 } from "@writers-room/contracts";
 import { agentDefinitionSchema } from "@writers-room/contracts";
+import type { RoomSettings } from "@writers-room/contracts";
 import { api } from "./api.js";
 import {
   ModelPicker,
@@ -55,6 +59,17 @@ import {
 } from "./voice-template.js";
 import { validationMessage } from "./validation.js";
 import { MarkdownMessage } from "./markdown-message.js";
+import { roomPressure, roomPressurePercent } from "./room-pressure.js";
+import {
+  applyRoomMode,
+  roomModeLabel,
+  roomModeOptions
+} from "./room-modes.js";
+import {
+  availableReasoningEfforts,
+  reconcileReasoningConfig,
+  type ReasoningSupport
+} from "./reasoning-controls.js";
 
 const participantColors = ["#c96c47", "#637d68", "#7566a3", "#b08a3f", "#477b8f"];
 
@@ -81,10 +96,41 @@ function generationFor(
   return snapshot.generations.find(generation => generation.id === message.generationId);
 }
 
-function MessageDetails({ generation, workspaceRevision }: {
+export function reasoningTraceLabel(
+  generation: GenerationRecord,
+  _reasoning: AgentDefinition["reasoning"] | undefined
+): string {
+  // Older records predate generation-time policy snapshots. Treat those as
+  // hidden rather than applying a participant's newer, more permissive policy.
+  const displayPolicy = generation.reasoningConfig ?? {
+    enabled: false,
+    displayMode: "hidden" as const
+  };
+  if (displayPolicy?.displayMode === "hidden") {
+    return "Reasoning trace hidden by this voice's settings.";
+  }
+  const visible = displayPolicy?.displayMode === "full"
+    ? generation.reasoningText ?? generation.reasoningSummary
+    : generation.reasoningSummary;
+  if (visible) return visible;
+  if ((generation.reasoningTokens ?? 0) > 0) {
+    return `The model used ${generation.reasoningTokens} reasoning tokens, but its provider did not expose a trace.`;
+  }
+  if (displayPolicy?.enabled) {
+    return "Reasoning was requested, but this model/provider returned no visible trace.";
+  }
+  if (displayPolicy === undefined) {
+    return "Reasoning display policy is unavailable for this historical generation.";
+  }
+  return "Reasoning was disabled for this voice.";
+}
+
+function MessageDetails({ generation, agent, workspaceRevision }: {
   generation: GenerationRecord;
+  agent?: AgentDefinition;
   workspaceRevision: string;
 }) {
+  const generationReasoning = generation.reasoningConfig ?? agent?.reasoning;
   const [open, setOpen] = useState(false);
   const [inspectionError, setInspectionError] = useState<string>();
   const [inspection, setInspection] = useState<Awaited<
@@ -125,12 +171,24 @@ function MessageDetails({ generation, workspaceRevision }: {
           {inspectionError && <div className="settings-error">{inspectionError}</div>}
           <section>
             <span className="detail-label">Reasoning</span>
-            <p>
-              {generation.reasoningSummary ??
-                generation.reasoningText ??
-                "Reasoning unavailable from this model/provider."}
-            </p>
+            <p>{reasoningTraceLabel(generation, agent?.reasoning)}</p>
           </section>
+          {generation.deliberationPasses && generation.deliberationPasses.length > 0 && (
+            <section>
+              <span className="detail-label">Private study drafts</span>
+              <p className="detail-help">
+                Application-level provisional memos visible to you; these are not provider chain-of-thought.
+              </p>
+              <div className="deliberation-list">
+                {generation.deliberationPasses.map(pass => (
+                  <details key={pass.ordinal}>
+                    <summary>Pass {pass.ordinal}</summary>
+                    <MarkdownMessage content={pass.text} />
+                  </details>
+                ))}
+              </div>
+            </section>
+          )}
           <section className="detail-grid">
             <div>
               <span className="detail-label">Model</span>
@@ -149,6 +207,12 @@ function MessageDetails({ generation, workspaceRevision }: {
               <strong>{generation.costUsd === undefined || generation.costUsd === null
                 ? "—"
                 : `$${generation.costUsd.toFixed(4)}`}</strong>
+            </div>
+            <div>
+              <span className="detail-label">Reasoning level</span>
+              <strong>{generationReasoning?.enabled
+                ? generationReasoning.effort ?? "provider default"
+                : "off"}</strong>
             </div>
           </section>
           {inspection && inspection.citations.length > 0 && (
@@ -192,11 +256,31 @@ function MessageDetails({ generation, workspaceRevision }: {
   );
 }
 
-function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
+export function replyContextFor(
+  snapshot: RoomSnapshot,
+  message: RoomMessage
+): { author: string; excerpt: string } | undefined {
+  if (!message.replyToMessageId) return undefined;
+  const target = snapshot.messages.find(candidate =>
+    candidate.id === message.replyToMessageId
+  );
+  if (!target) return { author: "an earlier message", excerpt: "" };
+  const author = target.authorType === "human"
+    ? "You"
+    : snapshot.agents.find(agent => agent.id === target.authorId)?.name ?? target.authorId;
+  const normalized = target.content.replace(/\s+/g, " ").trim();
+  return {
+    author,
+    excerpt: normalized.length > 120 ? `${normalized.slice(0, 117)}…` : normalized
+  };
+}
+
+function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail, onReply }: {
   snapshot: RoomSnapshot;
   busy: boolean;
   onDeleteTail: () => void;
   onRegenerateTail: () => void;
+  onReply: (message: RoomMessage) => void;
 }) {
   const bottom = useRef<HTMLDivElement>(null);
   const messages = snapshot.messages.filter(message => message.lifecycle === "active");
@@ -213,6 +297,7 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
         const isHuman = message.authorType === "human";
         const agent = snapshot.agents.find(candidate => candidate.id === message.authorId);
         const generation = generationFor(snapshot, message);
+        const replyContext = replyContextFor(snapshot, message);
         const isTail = index === messages.length - 1 && !isHuman && message.status !== "streaming";
         return (
           <article
@@ -229,9 +314,15 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
               <header>
                 <strong>{isHuman ? "You" : agent?.name ?? message.authorId}</strong>
                 <span>{formatTime(message.createdAt)}</span>
-                {message.replyToMessageId && <span className="reply-label">reply</span>}
                 {message.status === "streaming" && <LoaderCircle size={13} className="spin" />}
               </header>
+              {replyContext && (
+                <div className="reply-context">
+                  <Reply size={11} />
+                  <span>Replying to <strong>{replyContext.author}</strong></span>
+                  {replyContext.excerpt && <q>{replyContext.excerpt}</q>}
+                </div>
+              )}
               <div className="message-copy">
                 {message.content
                   ? <MarkdownMessage content={message.content} />
@@ -240,17 +331,25 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
               {generation && (
                 <MessageDetails
                   generation={generation}
+                  {...(agent === undefined ? {} : { agent })}
                   workspaceRevision={workspaceRevision}
                 />
               )}
-              {isTail && (
+              {message.status !== "streaming" && (
                 <div className="tail-actions">
-                  <button onClick={onRegenerateTail} disabled={busy}>
-                    <RotateCcw size={12} /> Regenerate
+                  <button onClick={() => onReply(message)} disabled={busy}>
+                    <Reply size={12} /> Reply
                   </button>
-                  <button onClick={onDeleteTail} disabled={busy}>
-                    <X size={12} /> Remove
-                  </button>
+                  {isTail && (
+                    <>
+                      <button onClick={onRegenerateTail} disabled={busy}>
+                        <RotateCcw size={12} /> Regenerate
+                      </button>
+                      <button onClick={onDeleteTail} disabled={busy}>
+                        <X size={12} /> Remove
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -275,6 +374,7 @@ function WorkspacePanel({ snapshot, onChanged }: {
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string>();
   const [note, setNote] = useState("");
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const dragDepth = useRef(0);
 
   function showError(errorValue: unknown) {
@@ -289,6 +389,50 @@ function WorkspacePanel({ snapshot, onChanged }: {
       for (const file of files) {
         await api.upload(snapshot.room.id, file);
       }
+      await onChanged();
+    } catch (errorValue) {
+      showError(errorValue);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function uploadRepository(files: File[]) {
+    const ignoredDirectories = new Set([
+      ".git", ".next", "build", "coverage", "dist", "node_modules", "target", "vendor"
+    ]);
+    const sensitiveDirectories = new Set([".aws", ".gnupg", ".ssh"]);
+    const sensitiveNames = new Set([
+      ".env", ".netrc", ".npmrc", ".pypirc", "credentials",
+      "credentials.json", "id_dsa", "id_ed25519", "id_rsa"
+    ]);
+    const selected = files.filter(file => {
+      const path = file.webkitRelativePath || file.name;
+      const segments = path.toLowerCase().split("/");
+      const filename = segments.at(-1)!;
+      return !segments.some(segment =>
+        ignoredDirectories.has(segment) || sensitiveDirectories.has(segment)
+      ) &&
+        !sensitiveNames.has(filename) &&
+        !filename.startsWith(".env.") &&
+        !/(?:^|\.)(?:key|p12|pfx)$/.test(filename) &&
+        !/(?:^|[._-])secrets?(?:[._-]|$)/.test(filename);
+    });
+    if (selected.length === 0) {
+      setError("No indexable repository files were selected.");
+      return;
+    }
+    setUploading(true);
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const result = await api.uploadRepository(snapshot.room.id, selected);
+      const skippedDirectories = files.length - selected.length;
+      setNotice([
+        `Indexed ${result.imported} repository files.`,
+        result.failures.length > 0 ? `${result.failures.length} unsupported or sensitive files were skipped.` : "",
+        skippedDirectories > 0 ? `${skippedDirectories} dependency, build, or credential files were ignored.` : ""
+      ].filter(Boolean).join(" "));
       await onChanged();
     } catch (errorValue) {
       showError(errorValue);
@@ -386,21 +530,41 @@ function WorkspacePanel({ snapshot, onChanged }: {
       )}
       <div className="panel-title">
         <span><PanelLeft size={16} /> The table</span>
-        <label className="icon-button upload-button" title="Upload document">
-          {uploading ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />}
-          <input
-            type="file"
-            accept=".md,.markdown,.txt,.pdf,text/plain,text/markdown,application/pdf"
-            disabled={uploading}
-            onChange={event => {
-              const input = event.currentTarget;
-              const file = input.files?.[0];
-              if (file) void uploadFiles([file]).finally(() => {
-                input.value = "";
-              });
-            }}
-          />
-        </label>
+        <div className="panel-title-actions">
+          <label className="icon-button upload-button" title="Add repository folder">
+            <FolderGit2 size={15} />
+            <input
+              type="file"
+              multiple
+              disabled={uploading}
+              ref={input => {
+                if (input) input.setAttribute("webkitdirectory", "");
+              }}
+              onChange={event => {
+                const input = event.currentTarget;
+                const files = Array.from(input.files ?? []);
+                if (files.length > 0) void uploadRepository(files).finally(() => {
+                  input.value = "";
+                });
+              }}
+            />
+          </label>
+          <label className="icon-button upload-button" title="Upload document">
+            {uploading ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />}
+            <input
+              type="file"
+              accept=".md,.markdown,.txt,.pdf,text/plain,text/markdown,application/pdf"
+              disabled={uploading}
+              onChange={event => {
+                const input = event.currentTarget;
+                const file = input.files?.[0];
+                if (file) void uploadFiles([file]).finally(() => {
+                  input.value = "";
+                });
+              }}
+            />
+          </label>
+        </div>
       </div>
       <form className="workspace-search" onSubmit={search}>
         <Search size={14} />
@@ -411,6 +575,7 @@ function WorkspacePanel({ snapshot, onChanged }: {
         />
       </form>
       {error && <div className="settings-error" role="alert">{error}</div>}
+      {notice && <div className="workspace-notice" role="status">{notice}</div>}
       {results.length > 0 && (
         <div className="search-results">
           <div className="section-label">Search results</div>
@@ -443,6 +608,13 @@ function WorkspacePanel({ snapshot, onChanged }: {
                 <strong>{artifact.filename}</strong>
                 <span>{artifact.error ?? artifact.summary}</span>
                 <small className={`status-${artifact.ingestionStatus}`}>
+                  {artifact.sourceType === "repository" ? "repository · " : ""}
+                  {artifact.sourceType === "persona-memory"
+                    ? `${snapshot.agents.find(agent =>
+                        agent.id === artifact.ownerAgentId
+                      )?.name ?? "removed voice"} library · `
+                    : ""}
+                  {artifact.voiceTemplateLibraryItemId ? "managed in Voice Settings · " : ""}
                   {artifact.ingestionStatus}
                 </small>
               </div>
@@ -462,16 +634,18 @@ function WorkspacePanel({ snapshot, onChanged }: {
                         : <RotateCcw size={13} />}
                     </button>
                   )}
-                  <button
-                    type="button"
-                    className="icon-button danger-icon"
-                    aria-label={`Delete ${artifact.filename}`}
-                    title="Delete file"
-                    disabled={busy}
-                    onClick={() => setConfirmingDeleteId(artifact.id)}
-                  >
-                    <Trash2 size={13} />
-                  </button>
+                  {!artifact.voiceTemplateLibraryItemId && (
+                    <button
+                      type="button"
+                      className="icon-button danger-icon"
+                      aria-label={`Delete ${artifact.filename}`}
+                      title="Delete file"
+                      disabled={busy}
+                      onClick={() => setConfirmingDeleteId(artifact.id)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  )}
                 </div>
               )}
               {confirming && (
@@ -538,6 +712,7 @@ function AddAgent({ roomId, onAdded, onClose }: {
   const [templates, setTemplates] = useState<VoiceTemplate[]>([]);
   const [templateId, setTemplateId] = useState("");
   const [capabilities, setCapabilities] = useState<ModelCapabilities>();
+  const [reasoningSupport, setReasoningSupport] = useState<ReasoningSupport>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -669,6 +844,7 @@ function AddAgent({ roomId, onAdded, onClose }: {
                 );
                 update("modelId", "");
                 setCapabilities(undefined);
+                setReasoningSupport(undefined);
               }}
             >
               <option value="openrouter">OpenRouter</option>
@@ -682,6 +858,18 @@ function AddAgent({ roomId, onAdded, onClose }: {
               value={draft.modelId}
               onChange={modelId => update("modelId", modelId)}
               onCapabilities={setCapabilities}
+              onModel={(model: ModelDescriptor | undefined) => {
+                setReasoningSupport(model?.reasoning);
+                if (model) {
+                  setDraft(current => ({
+                    ...current,
+                    reasoning: reconcileReasoningConfig(
+                      current.reasoning,
+                      model.reasoning
+                    )
+                  }));
+                }
+              }}
             />
           </label>
         </div>
@@ -701,6 +889,70 @@ function AddAgent({ roomId, onAdded, onClose }: {
             placeholder="Short stylistic direction for this voice."
           />
         </label>
+        <div className="field-row">
+          <label>Reasoning level
+            <select
+              value={draft.reasoning.enabled ? draft.reasoning.effort ?? "medium" : "off"}
+              onChange={event => {
+                const effort = event.target.value;
+                update("reasoning", effort === "off"
+                  ? { ...draft.reasoning, enabled: false }
+                  : {
+                      ...draft.reasoning,
+                      enabled: true,
+                      effort: effort as NonNullable<
+                        VoiceTemplateInput["reasoning"]["effort"]
+                      >
+                    });
+              }}
+            >
+              {!reasoningSupport?.mandatory && <option value="off">Off</option>}
+              {availableReasoningEfforts(reasoningSupport).map(option => (
+                <option value={option.value} key={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>Reasoning token cap
+            <input
+              type="number"
+              min={1}
+              disabled={!draft.reasoning.enabled || reasoningSupport?.supportsMaxTokens === false}
+              value={draft.reasoning.maxTokens ?? ""}
+              placeholder="Provider default"
+              onChange={event => update("reasoning", {
+                ...draft.reasoning,
+                maxTokens: event.target.value === ""
+                  ? undefined
+                  : Number(event.target.value)
+              })}
+            />
+          </label>
+          <label>Reasoning display
+            <select
+              disabled={!draft.reasoning.enabled}
+              value={draft.reasoning.displayMode}
+              onChange={event => update("reasoning", {
+                ...draft.reasoning,
+                displayMode: event.target.value as
+                  VoiceTemplateInput["reasoning"]["displayMode"]
+              })}
+            >
+              <option value="summary">Summary when available</option>
+              <option value="full">Full trace when available</option>
+              <option value="hidden">Hidden</option>
+            </select>
+          </label>
+        </div>
+        {draft.reasoning.enabled && capabilities && !capabilities.reasoningInputControl && (
+          <small className="field-error">
+            This model does not advertise reasoning controls; the provider may ignore this level.
+          </small>
+        )}
+        {reasoningSupport?.supportsMaxTokens === false && (
+          <small className="field-error">
+            This model does not support a custom reasoning token cap.
+          </small>
+        )}
         {error && <div className="settings-error" role="alert">{error}</div>}
         <footer>
           <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
@@ -717,15 +969,30 @@ function AddAgent({ roomId, onAdded, onClose }: {
   );
 }
 
-function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
+function ParticipantsPanel({
+  snapshot,
+  busy,
+  replyTargetMessageId,
+  onAction,
+  onAdd,
+  onRemove
+}: {
   snapshot: RoomSnapshot;
   busy: boolean;
+  replyTargetMessageId?: string;
   onAction: (action: () => Promise<unknown>) => void;
   onAdd: () => void;
   onRemove: (agentId: string) => Promise<boolean>;
 }) {
+  const [pressureClock, setPressureClock] = useState(() => Date.now());
   const [confirmingRemovalId, setConfirmingRemovalId] = useState<string>();
   const [removingId, setRemovingId] = useState<string>();
+  useEffect(() => {
+    const timer = window.setInterval(() => setPressureClock(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const currentPressure = roomPressure(snapshot.messages, pressureClock);
+  const pressurePercent = roomPressurePercent(snapshot.messages, pressureClock);
   return (
     <aside className="right-panel">
       <div className="panel-title">
@@ -744,6 +1011,9 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
             generation => generation.agentId === agent.id && generation.status === "streaming"
           );
           const activation = snapshot.activations.find(item => item.agentId === agent.id);
+          const libraryCount = snapshot.artifacts.filter(
+            artifact => artifact.ownerAgentId === agent.id
+          ).length;
           return (
             <div className="participant" key={agent.id}>
               <div className="participant-head">
@@ -760,7 +1030,10 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
               {activation?.decision.reason && (
                 <div className="activation-reason" title={`Activation score ${activation.score.toFixed(2)}`}>
                   <BrainCircuit size={11} />
-                  <span>{activation.decision.reason}</span>
+                  <span>
+                    {activation.source === "scheduler" ? "Scheduler fallback: " : ""}
+                    {activation.decision.reason}
+                  </span>
                 </div>
               )}
               <div className="fatigue-row">
@@ -772,6 +1045,30 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
                 <b>{Math.round((runtime?.fatigue ?? 0) * 100)}%</b>
               </div>
               <div className="participant-actions">
+                <label
+                  className={`participant-library ${busy ? "disabled" : ""}`}
+                  title={`Add private reference material for ${agent.name}`}
+                >
+                  <Upload size={13} /> Library {libraryCount > 0 ? `(${libraryCount})` : ""}
+                  <input
+                    type="file"
+                    multiple
+                    accept=".md,.markdown,.txt,.pdf,text/plain,text/markdown,application/pdf"
+                    disabled={busy}
+                    onChange={event => {
+                      const input = event.currentTarget;
+                      const files = Array.from(input.files ?? []);
+                      if (files.length > 0) {
+                        onAction(async () => {
+                          for (const file of files) {
+                            await api.upload(snapshot.room.id, file, agent.id);
+                          }
+                        });
+                      }
+                      input.value = "";
+                    }}
+                  />
+                </label>
                 <button
                   className="participant-remove"
                   title={`Remove ${agent.name} from room`}
@@ -793,7 +1090,11 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
                 <button
                   disabled={busy || generating || runtime?.muted}
                   onClick={() => onAction(() =>
-                    api.selectSpeaker(snapshot.room.id, agent.id)
+                    api.selectSpeaker(
+                      snapshot.room.id,
+                      agent.id,
+                      replyTargetMessageId
+                    )
                   )}
                 >
                   <Mic2 size={13} /> Invite
@@ -833,11 +1134,9 @@ function ParticipantsPanel({ snapshot, busy, onAction, onAdd, onRemove }: {
         })}
       </div>
       <div className="room-meter">
-        <span>Room pressure</span>
-        <div><i style={{ width: `${Math.min(100, snapshot.messages.filter(message =>
-          message.authorType === "agent" && message.lifecycle === "active"
-        ).length * 8)}%` }} /></div>
-        <small>Soft pacing protects the conversation from runaway loops.</small>
+        <span>Room pressure · {currentPressure.toFixed(1)} / 7</span>
+        <div><i style={{ width: `${pressurePercent}%` }} /></div>
+        <small>Recent agent turns decay by half every 10 minutes.</small>
       </div>
     </aside>
   );
@@ -1093,6 +1392,7 @@ export default function App() {
   const [roomId, setRoomId] = useState<string>();
   const [snapshot, setSnapshot] = useState<RoomSnapshot>();
   const [composer, setComposer] = useState("");
+  const [replyTargetId, setReplyTargetId] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [showAgent, setShowAgent] = useState(false);
@@ -1104,9 +1404,14 @@ export default function App() {
   const refreshRequestRef = useRef(0);
   const activeRoomIdRef = useRef<string | undefined>(undefined);
   const roomPickerRef = useRef<HTMLButtonElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   latestSequenceRef.current = snapshot && snapshot.room.id === roomId
     ? snapshot.latestSequence
     : 0;
+
+  useEffect(() => {
+    setReplyTargetId(undefined);
+  }, [roomId]);
 
   const refresh = useCallback(async (selectedRoomId?: string) => {
     const activeRoomIdAtStart = activeRoomIdRef.current;
@@ -1235,6 +1540,7 @@ export default function App() {
     draft: string;
     content: string;
     mentionedAgentIds: string[];
+    replyToMessageId?: string;
   }): Promise<void> {
     if (busy) return;
     setBusy(true);
@@ -1243,8 +1549,16 @@ export default function App() {
       // Keep the draft visible until the server confirms it was durably
       // accepted. A gateway failure must never turn a typed message into an
       // apparently successful, empty composer.
-      await api.sendMessage(input.roomId, input.content, input.mentionedAgentIds);
+      await api.sendMessage(
+        input.roomId,
+        input.content,
+        input.mentionedAgentIds,
+        input.replyToMessageId
+      );
       setComposer(current => current === input.draft ? "" : current);
+      setReplyTargetId(current =>
+        current === input.replyToMessageId ? undefined : current
+      );
       await refresh(input.roomId);
     } catch (errorValue) {
       setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
@@ -1310,6 +1624,9 @@ export default function App() {
       </>
     );
   }
+  const replyTarget = replyTargetId === undefined
+    ? undefined
+    : snapshot.messages.find(message => message.id === replyTargetId);
 
   return (
     <div className="app-shell">
@@ -1354,15 +1671,21 @@ export default function App() {
           <label className="compact-select">
             <Sparkles size={13} />
             <select
-              value={snapshot.room.settings.maxResponders}
-              onChange={event => void runRoomAction(() => api.updateRoom(snapshot.room.id, {
-                settings: { maxResponders: Number(event.target.value) }
-              }))}
+              value={snapshot.room.settings.conversationStyle}
+              title={roomModeOptions.find(option =>
+                option.value === snapshot.room.settings.conversationStyle
+              )?.description}
+              onChange={event => {
+                const style = event.target.value as RoomSettings["conversationStyle"];
+                void runRoomAction(() => api.updateRoom(snapshot.room.id, {
+                  settings: applyRoomMode(snapshot.room.settings, style)
+                }));
+              }}
               disabled={busy}
             >
-              <option value={1}>Focused</option>
-              <option value={2}>Workshop</option>
-              <option value={3}>Writers’ room</option>
+              {roomModeOptions.map(option => (
+                <option value={option.value} key={option.value}>{option.label}</option>
+              ))}
             </select>
           </label>
           <button
@@ -1390,6 +1713,7 @@ export default function App() {
             <div>
               <span className="eyebrow">Live discussion</span>
               <h1>{snapshot.room.title}</h1>
+              <small>{roomModeLabel(snapshot.room.settings.conversationStyle)}</small>
             </div>
             <div className="run-limits">
               <span>{snapshot.room.settings.maxResponders} responders</span>
@@ -1428,6 +1752,10 @@ export default function App() {
             busy={busy}
             onDeleteTail={() => void runRoomAction(() => api.deleteTail(snapshot.room.id))}
             onRegenerateTail={() => void runRoomAction(() => api.regenerateTail(snapshot.room.id))}
+            onReply={message => {
+              setReplyTargetId(message.id);
+              window.requestAnimationFrame(() => composerRef.current?.focus());
+            }}
           />
           <form
             className="composer"
@@ -1442,10 +1770,31 @@ export default function App() {
                 roomId: snapshot.room.id,
                 draft,
                 content,
-                mentionedAgentIds: [...mentions]
+                mentionedAgentIds: [...mentions],
+                ...(replyTargetId === undefined
+                  ? {}
+                  : { replyToMessageId: replyTargetId })
               });
             }}
           >
+            {replyTarget && (
+              <div className="composer-reply-context">
+                <Reply size={12} />
+                <span>
+                  Replying to <strong>{replyTarget.authorType === "human"
+                    ? "your message"
+                    : snapshot.agents.find(agent => agent.id === replyTarget.authorId)?.name ?? replyTarget.authorId}</strong>
+                  {replyTarget.content && ` · ${replyTarget.content.replace(/\s+/g, " ").slice(0, 120)}`}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Cancel reply"
+                  onClick={() => setReplyTargetId(undefined)}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )}
             {mentionSuggestions.length > 0 && (
               <div className="mention-menu" role="listbox" aria-label="Mention a participant">
                 {mentionSuggestions.map((agent, index) => (
@@ -1467,6 +1816,7 @@ export default function App() {
               </div>
             )}
             <textarea
+              ref={composerRef}
               aria-label="Room message"
               autoComplete="off"
               data-1p-ignore
@@ -1516,6 +1866,9 @@ export default function App() {
         <ParticipantsPanel
           snapshot={snapshot}
           busy={busy}
+          {...(replyTargetId === undefined
+            ? {}
+            : { replyTargetMessageId: replyTargetId })}
           onAction={action => void runRoomAction(action)}
           onAdd={() => setShowAgent(true)}
           onRemove={agentId => runRoomAction(

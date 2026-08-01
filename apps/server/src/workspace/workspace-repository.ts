@@ -68,10 +68,51 @@ export class WorkspaceRepository {
     this.vectorExtensionAvailable = available;
   }
 
-  findByHash(roomId: string, sha256: string): WorkspaceArtifact | undefined {
+  findByHash(
+    roomId: string,
+    sha256: string,
+    identity?: {
+      filename?: string;
+      sourceType?: WorkspaceArtifact["sourceType"];
+      ownerAgentId?: string;
+      voiceTemplateLibraryItemId?: string;
+    }
+  ): WorkspaceArtifact | undefined {
+    const filenameFilter = identity?.filename === undefined
+      ? ""
+      : "AND json_extract(payload_json, '$.filename') = ?";
+    const sourceTypeFilter = identity?.sourceType === undefined
+      ? ""
+      : "AND json_extract(payload_json, '$.sourceType') = ?";
+    const ownerFilter = identity === undefined
+      ? ""
+      : identity.ownerAgentId === undefined
+        ? "AND json_extract(payload_json, '$.ownerAgentId') IS NULL"
+      : "AND json_extract(payload_json, '$.ownerAgentId') = ?";
+    const libraryItemFilter = identity === undefined
+      ? ""
+      : identity.voiceTemplateLibraryItemId === undefined
+        ? "AND json_extract(payload_json, '$.voiceTemplateLibraryItemId') IS NULL"
+        : "AND json_extract(payload_json, '$.voiceTemplateLibraryItemId') = ?";
     const row = this.store.database.prepare(`
-      SELECT payload_json FROM artifacts WHERE room_id = ? AND sha256 = ?
-    `).get(roomId, sha256) as JsonRow | undefined;
+      SELECT payload_json FROM artifacts
+      WHERE room_id = ? AND sha256 = ?
+        ${filenameFilter}
+        ${sourceTypeFilter}
+        ${ownerFilter}
+        ${libraryItemFilter}
+      LIMIT 1
+    `).get(
+      roomId,
+      sha256,
+      ...(identity?.filename === undefined ? [] : [identity.filename]),
+      ...(identity?.sourceType === undefined ? [] : [identity.sourceType]),
+      ...(identity?.ownerAgentId === undefined ? [] : [identity.ownerAgentId]),
+      ...(identity?.voiceTemplateLibraryItemId === undefined
+        ? []
+        : [identity.voiceTemplateLibraryItemId])
+    ) as
+      JsonRow | undefined;
     return row ? artifactSchema.parse(JSON.parse(row.payload_json)) : undefined;
   }
 
@@ -142,6 +183,8 @@ export class WorkspaceRepository {
     roomId: string,
     query: string,
     artifactIds: string[] | undefined,
+    sourceTypes: WorkspaceArtifact["sourceType"][] | undefined,
+    visibleToAgentId: string | undefined,
     limit: number
   ): ArtifactChunk[] {
     const selectedIds = artifactIds ? [...new Set(artifactIds)] : undefined;
@@ -149,6 +192,16 @@ export class WorkspaceRepository {
     const artifactFilter = selectedIds
       ? `AND c.artifact_id IN (${selectedIds.map(() => "?").join(", ")})`
       : "";
+    const selectedSourceTypes = sourceTypes
+      ? [...new Set(sourceTypes)]
+      : undefined;
+    if (selectedSourceTypes?.length === 0) return [];
+    const sourceFilter = selectedSourceTypes
+      ? `AND json_extract(a.payload_json, '$.sourceType') IN (${selectedSourceTypes.map(() => "?").join(", ")})`
+      : "";
+    const visibilityFilter = visibleToAgentId === undefined
+      ? ""
+      : "AND (json_extract(a.payload_json, '$.ownerAgentId') IS NULL OR json_extract(a.payload_json, '$.ownerAgentId') = ?)";
     const rows = this.store.database.prepare(`
       SELECT c.payload_json
       FROM artifact_chunks c
@@ -156,12 +209,16 @@ export class WorkspaceRepository {
       WHERE a.room_id = ?
         AND instr(lower(c.text), lower(?)) > 0
         ${artifactFilter}
+        ${sourceFilter}
+        ${visibilityFilter}
       ORDER BY a.updated_at DESC, c.ordinal
       LIMIT ?
     `).all(
       roomId,
       query,
       ...(selectedIds ?? []),
+      ...(selectedSourceTypes ?? []),
+      ...(visibleToAgentId === undefined ? [] : [visibleToAgentId]),
       limit
     ) as JsonRow[];
     return rows.map(row =>
@@ -258,18 +315,40 @@ export class WorkspaceRepository {
     return artifactChunkSchema.parse(JSON.parse(row.payload_json));
   }
 
-  lexicalCandidates(roomId: string, query: string, limit: number): RankedChunk[] {
+  lexicalCandidates(
+    roomId: string,
+    query: string,
+    limit: number,
+    sourceTypes?: WorkspaceArtifact["sourceType"][],
+    visibleToAgentId?: string
+  ): RankedChunk[] {
     const match = ftsQuery(query);
     if (!match) return [];
+    const selectedSourceTypes = sourceTypes ? [...new Set(sourceTypes)] : undefined;
+    if (selectedSourceTypes?.length === 0) return [];
+    const sourceFilter = selectedSourceTypes
+      ? `AND json_extract(a.payload_json, '$.sourceType') IN (${selectedSourceTypes.map(() => "?").join(", ")})`
+      : "";
+    const visibilityFilter = visibleToAgentId === undefined
+      ? ""
+      : "AND (json_extract(a.payload_json, '$.ownerAgentId') IS NULL OR json_extract(a.payload_json, '$.ownerAgentId') = ?)";
     const rows = this.store.database.prepare(`
       SELECT c.payload_json
       FROM artifact_chunks_fts f
       JOIN artifact_chunks c ON c.rowid = f.rowid
       JOIN artifacts a ON a.id = c.artifact_id
       WHERE artifact_chunks_fts MATCH ? AND a.room_id = ?
+        ${sourceFilter}
+        ${visibilityFilter}
       ORDER BY f.rank
       LIMIT ?
-    `).all(match, roomId, limit) as JsonRow[];
+    `).all(
+      match,
+      roomId,
+      ...(selectedSourceTypes ?? []),
+      ...(visibleToAgentId === undefined ? [] : [visibleToAgentId]),
+      limit
+    ) as JsonRow[];
     return rows.map((row, index) => ({
       chunk: artifactChunkSchema.parse(JSON.parse(row.payload_json)),
       rank: index + 1
@@ -279,8 +358,18 @@ export class WorkspaceRepository {
   vectorCandidates(
     roomId: string,
     query: Float32Array,
-    limit: number
+    limit: number,
+    sourceTypes?: WorkspaceArtifact["sourceType"][],
+    visibleToAgentId?: string
   ): RankedChunk[] {
+    const selectedSourceTypes = sourceTypes ? [...new Set(sourceTypes)] : undefined;
+    if (selectedSourceTypes?.length === 0) return [];
+    const sourceFilter = selectedSourceTypes
+      ? `AND json_extract(a.payload_json, '$.sourceType') IN (${selectedSourceTypes.map(() => "?").join(", ")})`
+      : "";
+    const visibilityFilter = visibleToAgentId === undefined
+      ? ""
+      : "AND (json_extract(a.payload_json, '$.ownerAgentId') IS NULL OR json_extract(a.payload_json, '$.ownerAgentId') = ?)";
     if (this.vectorExtensionAvailable) {
       try {
         const rows = this.store.database.prepare(`
@@ -289,9 +378,17 @@ export class WorkspaceRepository {
           FROM artifact_chunks c
           JOIN artifacts a ON a.id = c.artifact_id
           WHERE a.room_id = ? AND c.embedding IS NOT NULL
+            ${sourceFilter}
+            ${visibilityFilter}
           ORDER BY distance
           LIMIT ?
-        `).all(fromEmbedding(query), roomId, limit) as JsonRow[];
+        `).all(
+          fromEmbedding(query),
+          roomId,
+          ...(selectedSourceTypes ?? []),
+          ...(visibleToAgentId === undefined ? [] : [visibleToAgentId]),
+          limit
+        ) as JsonRow[];
         return rows.map((row, index) => ({
           chunk: artifactChunkSchema.parse(JSON.parse(row.payload_json)),
           rank: index + 1
@@ -305,7 +402,13 @@ export class WorkspaceRepository {
       FROM artifact_chunks c
       JOIN artifacts a ON a.id = c.artifact_id
       WHERE a.room_id = ? AND c.embedding IS NOT NULL
-    `).all(roomId) as Array<JsonRow & { embedding: Buffer }>;
+        ${sourceFilter}
+        ${visibilityFilter}
+    `).all(
+      roomId,
+      ...(selectedSourceTypes ?? []),
+      ...(visibleToAgentId === undefined ? [] : [visibleToAgentId])
+    ) as Array<JsonRow & { embedding: Buffer }>;
     return rows
       .map(row => ({
         chunk: artifactChunkSchema.parse(JSON.parse(row.payload_json)),

@@ -20,8 +20,8 @@ import { WorkspaceRepository } from "./workspace-repository.js";
 
 export interface EmbeddingModel {
   readonly dimensions: number;
-  embedDocuments(texts: string[]): Promise<Float32Array[]>;
-  embedQuery(query: string): Promise<Float32Array>;
+  embedDocuments(texts: string[], signal?: AbortSignal): Promise<Float32Array[]>;
+  embedQuery(query: string, signal?: AbortSignal): Promise<Float32Array>;
 }
 
 export interface HousekeepingModel {
@@ -71,13 +71,38 @@ export class WorkspaceService {
     filename: string;
     mediaType: string;
     bytes: Buffer;
+    sourceType?: WorkspaceArtifact["sourceType"];
+    ownerAgentId?: string;
+    voiceTemplateLibraryItemId?: string;
   }): Promise<WorkspaceArtifact> {
     if (input.bytes.byteLength > 50 * 1024 * 1024) {
       throw new Error("Artifact exceeds the 50 MB upload limit");
     }
     this.options.store.getRoom(input.roomId);
+    const sourceType = input.sourceType ?? "upload";
+    if (sourceType === "persona-memory" && input.ownerAgentId === undefined) {
+      throw new Error("Persona memory requires an owning participant");
+    }
+    if (input.ownerAgentId !== undefined) {
+      this.options.store.getRoomAgent(input.roomId, input.ownerAgentId);
+    }
     const sha256 = createHash("sha256").update(input.bytes).digest("hex");
-    const existing = this.repository.findByHash(input.roomId, sha256);
+    const existing = this.repository.findByHash(
+      input.roomId,
+      sha256,
+      {
+        sourceType,
+        ...(sourceType === "repository" || sourceType === "persona-memory"
+          ? { filename: input.filename }
+          : {}),
+        ...(input.ownerAgentId === undefined
+          ? {}
+          : { ownerAgentId: input.ownerAgentId }),
+        ...(input.voiceTemplateLibraryItemId === undefined
+          ? {}
+          : { voiceTemplateLibraryItemId: input.voiceTemplateLibraryItemId })
+      }
+    );
     if (existing && existing.ingestionStatus !== "failed") return existing;
     if (existing) this.repository.deleteArtifact(existing.id);
     const now = new Date().toISOString();
@@ -88,7 +113,11 @@ export class WorkspaceService {
       mediaType: input.mediaType,
       sha256,
       byteSize: input.bytes.byteLength,
-      sourceType: "upload",
+      sourceType,
+      ...(input.ownerAgentId === undefined ? {} : { ownerAgentId: input.ownerAgentId }),
+      ...(input.voiceTemplateLibraryItemId === undefined
+        ? {}
+        : { voiceTemplateLibraryItemId: input.voiceTemplateLibraryItemId }),
       summary: "Queued for ingestion.",
       ingestionStatus: "processing",
       ingestionStage: "extracting",
@@ -141,12 +170,58 @@ export class WorkspaceService {
       roomId,
       filename: artifact.filename,
       mediaType: artifact.mediaType,
-      bytes
+      bytes,
+      sourceType: artifact.sourceType,
+      ...(artifact.ownerAgentId === undefined
+        ? {}
+        : { ownerAgentId: artifact.ownerAgentId }),
+      ...(artifact.voiceTemplateLibraryItemId === undefined
+        ? {}
+        : { voiceTemplateLibraryItemId: artifact.voiceTemplateLibraryItemId })
     });
   }
 
-  deleteArtifact(roomId: string, artifactId: string): WorkspaceArtifact {
+  async describeReferenceSource(input: {
+    filename: string;
+    mediaType: string;
+    bytes: Buffer;
+  }): Promise<{ summary: string; outline?: string }> {
+    if (input.bytes.byteLength > 50 * 1024 * 1024) {
+      throw new Error("Reference source exceeds the 50 MB upload limit");
+    }
+    const chunks = await this.parse(input.mediaType, input.filename, input.bytes);
+    if (chunks.length === 0) throw new Error("No text could be extracted");
+    return extractiveSummary(chunks);
+  }
+
+  storeReferenceBlob(bytes: Buffer): string {
+    if (bytes.byteLength > 50 * 1024 * 1024) {
+      throw new Error("Reference source exceeds the 50 MB upload limit");
+    }
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    this.writeBlob(sha256, bytes);
+    return sha256;
+  }
+
+  readReferenceBlob(sha256: string): Buffer {
+    const path = this.blobPath(sha256);
+    if (!existsSync(path)) throw new Error("The reference source is no longer available");
+    return readFileSync(path);
+  }
+
+  deleteArtifact(
+    roomId: string,
+    artifactId: string,
+    options?: { allowTemplateManaged?: boolean }
+  ): WorkspaceArtifact {
     const artifact = this.getArtifactForRoom(roomId, artifactId);
+    if (artifact.voiceTemplateLibraryItemId && !options?.allowTemplateManaged) {
+      const error = new Error(
+        "This reference is managed by its voice template. Remove it from Voice Settings."
+      ) as Error & { status?: number };
+      error.status = 409;
+      throw error;
+    }
     this.repository.deleteArtifact(artifact.id);
     this.garbageCollectBlobs([artifact.sha256]);
     this.options.store.appendRoomEvent(roomId, {
@@ -160,6 +235,7 @@ export class WorkspaceService {
     for (const sha256 of new Set(sha256Hashes)) {
       if (!/^[a-f0-9]{64}$/.test(sha256)) continue;
       if (this.repository.isHashReferenced(sha256)) continue;
+      if (this.options.store.isVoiceTemplateLibraryHashReferenced(sha256)) continue;
       const path = join(this.blobsRoot, sha256.slice(0, 2), sha256);
       try {
         if (existsSync(path)) unlinkSync(path);
@@ -189,6 +265,23 @@ export class WorkspaceService {
     return artifact;
   }
 
+  resolveArtifactForRoom(roomId: string, reference: string): WorkspaceArtifact {
+    const artifacts = this.listArtifacts(roomId);
+    const exactId = artifacts.find(artifact => artifact.id === reference);
+    if (exactId) return exactId;
+    const exactFilename = artifacts.filter(artifact => artifact.filename === reference);
+    if (exactFilename.length === 1) return exactFilename[0]!;
+    const basenameMatches = artifacts.filter(artifact =>
+      artifact.filename.split("/").at(-1) === reference
+    );
+    if (basenameMatches.length === 1) return basenameMatches[0]!;
+    throw new Error(
+      exactFilename.length > 1 || basenameMatches.length > 1
+        ? `Artifact reference is ambiguous: ${reference}`
+        : `Artifact not found: ${reference}`
+    );
+  }
+
   readRange(artifactId: string, start: number, end: number): ArtifactChunk[] {
     return this.repository.readRange(artifactId, start, end);
   }
@@ -213,25 +306,46 @@ export class WorkspaceService {
     roomId: string;
     query: string;
     artifactIds?: string[];
+    sourceTypes?: WorkspaceArtifact["sourceType"][];
+    visibleToAgentId?: string;
     limit?: number;
   }): ArtifactChunk[] {
     return this.repository.findExact(
       input.roomId,
       input.query,
       input.artifactIds,
+      input.sourceTypes,
+      input.visibleToAgentId,
       Math.max(1, Math.min(20, input.limit ?? 8))
     );
   }
 
-  manifest(roomId: string): string {
-    return this.listArtifacts(roomId)
+  manifest(roomId: string, agentId?: string): string {
+    const artifacts = this.listArtifacts(roomId);
+    const documents = artifacts
       .filter(artifact => artifact.ingestionStatus === "ready")
+      .filter(artifact => artifact.sourceType !== "repository")
+      .filter(artifact =>
+        artifact.ownerAgentId === undefined || artifact.ownerAgentId === agentId
+      )
       .map(artifact => [
-        `[${artifact.filename} | artifact_id: ${artifact.id}]`,
+        `[${artifact.filename} | artifact_id: ${artifact.id}${
+          artifact.sourceType === "persona-memory" ? " | private persona library" : ""
+        }]`,
         `Summary: ${artifact.summary}`,
         artifact.outline ? `Sections: ${artifact.outline}` : ""
       ].filter(Boolean).join("\n"))
       .join("\n\n");
+    const repositoryArtifacts = artifacts.filter(artifact =>
+      artifact.ingestionStatus === "ready" && artifact.sourceType === "repository"
+    );
+    const repositoryManifest = repositoryArtifacts.length > 0
+      ? [
+          `[Repository corpus | ${repositoryArtifacts.length} indexed files]`,
+          "Repository contents are brokered. Ask the Table Researcher automata with ask_table_researcher; direct document search does not expose repository chunks."
+        ].join("\n")
+      : "";
+    return [documents, repositoryManifest].filter(Boolean).join("\n\n");
   }
 
   health(): { vectorExtensionAvailable: boolean } {
@@ -243,17 +357,40 @@ export class WorkspaceService {
   async search(input: {
     roomId: string;
     query: string;
+    sourceTypes?: WorkspaceArtifact["sourceType"][];
+    visibleToAgentId?: string;
     limit?: number;
+    signal?: AbortSignal;
   }): Promise<WorkspaceSearchResult[]> {
+    input.signal?.throwIfAborted();
     const limit = Math.max(1, Math.min(20, input.limit ?? 8));
-    const lexical = this.repository.lexicalCandidates(input.roomId, input.query, 50);
+    const lexical = this.repository.lexicalCandidates(
+      input.roomId,
+      input.query,
+      50,
+      input.sourceTypes,
+      input.visibleToAgentId
+    );
     let vector: ReturnType<WorkspaceRepository["vectorCandidates"]> = [];
     try {
       const queryEmbedding = await this.options.embeddings.embedQuery(
-        `search_query: ${input.query}`
+        `search_query: ${input.query}`,
+        input.signal
       );
-      vector = this.repository.vectorCandidates(input.roomId, queryEmbedding, 50);
-    } catch {
+      input.signal?.throwIfAborted();
+      vector = this.repository.vectorCandidates(
+        input.roomId,
+        queryEmbedding,
+        50,
+        input.sourceTypes,
+        input.visibleToAgentId
+      );
+    } catch (error) {
+      if (input.signal?.aborted) {
+        throw error instanceof DOMException
+          ? error
+          : new DOMException("aborted", "AbortError");
+      }
       vector = [];
     }
     return this.repository.fuse({ lexical, vector, limit });
@@ -268,6 +405,7 @@ export class WorkspaceService {
       return parsePdf(bytes);
     }
     const text = bytes.toString("utf8");
+    if (text.includes("\0")) throw new Error("Binary files cannot be indexed as text");
     if (
       mediaType === "text/markdown" ||
       filename.toLowerCase().endsWith(".md") ||
@@ -275,7 +413,11 @@ export class WorkspaceService {
     ) {
       return parseMarkdown(text);
     }
-    if (mediaType.startsWith("text/") || filename.toLowerCase().endsWith(".txt")) {
+    if (
+      mediaType.startsWith("text/") ||
+      filename.toLowerCase().endsWith(".txt") ||
+      isRepositoryTextFile(filename, mediaType)
+    ) {
       return parsePlainText(text);
     }
     throw new Error(`Unsupported artifact format: ${mediaType}`);
@@ -377,4 +519,21 @@ export class WorkspaceService {
       }
     }
   }
+}
+
+const repositoryTextExtensions = new Set([
+  ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
+  ".ini", ".java", ".js", ".json", ".jsonc", ".jsx", ".kt", ".kts",
+  ".mjs", ".php", ".py", ".rb", ".rs", ".scss", ".sh", ".sql", ".swift",
+  ".toml", ".ts", ".tsx", ".vue", ".xml", ".yaml", ".yml"
+]);
+
+function isRepositoryTextFile(filename: string, mediaType: string): boolean {
+  if (mediaType === "application/json" || mediaType === "application/xml") return true;
+  const basename = filename.toLowerCase().split("/").at(-1) ?? "";
+  if (["dockerfile", "makefile", "procfile", ".gitignore", ".npmrc"].includes(basename)) {
+    return true;
+  }
+  const dot = basename.lastIndexOf(".");
+  return dot >= 0 && repositoryTextExtensions.has(basename.slice(dot));
 }

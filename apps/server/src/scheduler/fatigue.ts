@@ -3,6 +3,10 @@ import type {
   GenerationRecord,
   RoomMessage
 } from "@writers-room/contracts";
+import {
+  calculateRoomPressure,
+  ROOM_PRESSURE_POLICY
+} from "@writers-room/contracts";
 
 export const FATIGUE_POLICY = {
   short: 0.18,
@@ -106,22 +110,12 @@ export function assessRoomPressure(
   nowMs: number,
   halfLifeMs = 600_000
 ): RoomPressure {
-  let pressure = 0;
-  for (const message of messages) {
-    if (
-      message.authorType !== "agent" ||
-      message.lifecycle !== "active" ||
-      message.status !== "complete"
-    ) {
-      continue;
-    }
-    const ageMs = nowMs - Date.parse(message.createdAt);
-    if (ageMs < 0 || ageMs > halfLifeMs * 6) continue;
-    pressure += 2 ** (-ageMs / halfLifeMs);
-  }
-  const elevatedThreshold = 3;
-  const wrapThreshold = 5;
-  const hardThreshold = 7;
+  const pressure = calculateRoomPressure(messages, nowMs, halfLifeMs);
+  const {
+    elevatedThreshold,
+    wrapThreshold,
+    hardThreshold
+  } = ROOM_PRESSURE_POLICY;
   const thresholdBias = pressure <= elevatedThreshold
     ? 0
     : Math.min(0.2, ((pressure - elevatedThreshold) / (wrapThreshold - elevatedThreshold)) * 0.2);
@@ -132,4 +126,3 @@ export function assessRoomPressure(
     hardSuppressed: pressure >= hardThreshold
   };
 }
-

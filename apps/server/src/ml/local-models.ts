@@ -10,6 +10,7 @@ import type {
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  cleanup?: () => void;
 }
 
 interface WorkerReply {
@@ -46,12 +47,16 @@ export class LocalModelWorker implements EmbeddingModel, HousekeepingModel {
       const pending = this.pending.get(reply.id);
       if (!pending) return;
       this.pending.delete(reply.id);
+      pending.cleanup?.();
       if (reply.ok) pending.resolve(reply.result);
       else pending.reject(new Error(reply.error ?? "Local ML worker failed"));
     });
     this.worker.on("error", error => {
       this.closed = true;
-      for (const pending of this.pending.values()) pending.reject(error);
+      for (const pending of this.pending.values()) {
+        pending.cleanup?.();
+        pending.reject(error);
+      }
       this.pending.clear();
     });
     this.worker.on("exit", code => {
@@ -61,18 +66,24 @@ export class LocalModelWorker implements EmbeddingModel, HousekeepingModel {
           ? "Local ML worker closed"
           : `Local ML worker exited with code ${code}`
       );
-      for (const pending of this.pending.values()) pending.reject(error);
+      for (const pending of this.pending.values()) {
+        pending.cleanup?.();
+        pending.reject(error);
+      }
       this.pending.clear();
     });
   }
 
-  async embedDocuments(texts: string[]): Promise<Float32Array[]> {
-    const rows = await this.request<number[][]>({ type: "embed", texts });
+  async embedDocuments(
+    texts: string[],
+    signal?: AbortSignal
+  ): Promise<Float32Array[]> {
+    const rows = await this.request<number[][]>({ type: "embed", texts }, signal);
     return rows.map(row => new Float32Array(row));
   }
 
-  async embedQuery(query: string): Promise<Float32Array> {
-    return (await this.embedDocuments([query]))[0]!;
+  async embedQuery(query: string, signal?: AbortSignal): Promise<Float32Array> {
+    return (await this.embedDocuments([query], signal))[0]!;
   }
 
   summarize(input: {
@@ -86,6 +97,7 @@ export class LocalModelWorker implements EmbeddingModel, HousekeepingModel {
     if (this.closed) return;
     this.closed = true;
     for (const pending of this.pending.values()) {
+      pending.cleanup?.();
       pending.reject(new Error("Local ML worker closed"));
     }
     this.pending.clear();
@@ -93,19 +105,41 @@ export class LocalModelWorker implements EmbeddingModel, HousekeepingModel {
   }
 
   private request<Result>(
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<Result> {
     if (this.closed) return Promise.reject(new Error("Local ML worker is closed"));
+    if (signal?.aborted) {
+      return Promise.reject(new DOMException("aborted", "AbortError"));
+    }
     const id = uuidv7();
     return new Promise<Result>((resolve, reject) => {
+      const abort = () => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        pending.cleanup?.();
+        try {
+          this.worker.postMessage({ type: "cancel", targetId: id });
+        } catch {
+          // The worker is already closing.
+        }
+        reject(new DOMException("aborted", "AbortError"));
+      };
+      if (signal) signal.addEventListener("abort", abort, { once: true });
       this.pending.set(id, {
         resolve: value => resolve(value as Result),
-        reject
+        reject,
+        ...(signal === undefined
+          ? {}
+          : { cleanup: () => signal.removeEventListener("abort", abort) })
       });
       try {
         this.worker.postMessage({ id, ...payload });
       } catch (error) {
+        const pending = this.pending.get(id);
         this.pending.delete(id);
+        pending?.cleanup?.();
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });

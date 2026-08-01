@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AgentDefinition } from "@writers-room/contracts";
 import { RoomStore } from "../storage/room-store.js";
 import {
   WorkspaceService,
@@ -10,6 +11,28 @@ import {
 } from "./workspace-service.js";
 
 const roots: string[] = [];
+
+function fixtureAgent(id: string): AgentDefinition {
+  return {
+    id,
+    name: id,
+    description: `${id} perspective`,
+    provider: "openrouter",
+    modelId: "fixture",
+    systemPrompt: "Use private evidence carefully.",
+    temperature: 0,
+    maxOutputTokens: 256,
+    reasoning: { enabled: false, displayMode: "hidden" },
+    tools: [],
+    contextBudget: {
+      softLimitTokens: 4_000,
+      hardLimitTokens: 8_000,
+      recentTranscriptTokens: 2_000,
+      retrievedContextTokens: 1_000,
+      notebookTokens: 500
+    }
+  };
+}
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -37,6 +60,98 @@ const housekeeping: HousekeepingModel = {
 };
 
 describe("shared workspace seam", () => {
+  it("keeps persona libraries private to their owning participant", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-persona-library-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Private library room" });
+    store.addAgent(room.id, fixtureAgent("alpha"));
+    store.addAgent(room.id, fixtureAgent("beta"));
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: new FixtureEmbeddingModel(),
+      housekeeping
+    });
+    const alpha = await workspace.ingest({
+      roomId: room.id,
+      filename: "alpha-interview.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("# Craft\nAlpha believes the moon is an editorial compass."),
+      sourceType: "persona-memory",
+      ownerAgentId: "alpha"
+    });
+    const beta = await workspace.ingest({
+      roomId: room.id,
+      filename: "beta-interview.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("# Craft\nBeta believes the moon is a production constraint."),
+      sourceType: "persona-memory",
+      ownerAgentId: "beta"
+    });
+    const betaCopy = await workspace.ingest({
+      roomId: room.id,
+      filename: "alpha-interview.md",
+      mediaType: "text/markdown",
+      bytes: Buffer.from("# Craft\nAlpha believes the moon is an editorial compass."),
+      sourceType: "persona-memory",
+      ownerAgentId: "beta"
+    });
+
+    const alphaManifest = workspace.manifest(room.id, "alpha");
+    const betaManifest = workspace.manifest(room.id, "beta");
+    const alphaResults = await workspace.search({
+      roomId: room.id,
+      query: "moon",
+      sourceTypes: ["persona-memory"],
+      visibleToAgentId: "alpha"
+    });
+
+    expect(alphaManifest).toContain(alpha.id);
+    expect(alphaManifest).not.toContain(beta.id);
+    expect(betaManifest).toContain(beta.id);
+    expect(betaManifest).not.toContain(alpha.id);
+    expect(alphaResults.map(result => result.artifact.id)).toEqual([alpha.id]);
+    expect(betaCopy.id).not.toBe(alpha.id);
+    expect(betaCopy.ownerAgentId).toBe("beta");
+    store.close();
+  });
+
+  it("does not deduplicate a shared upload into a private or brokered artifact", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-visibility-dedup-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const room = store.createRoom({ title: "Visibility dedup room" });
+    store.addAgent(room.id, fixtureAgent("alpha"));
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: new FixtureEmbeddingModel(),
+      housekeeping
+    });
+    const bytes = Buffer.from("# Same bytes\nShared and private identities differ.");
+    const privateArtifact = await workspace.ingest({
+      roomId: room.id,
+      filename: "same.md",
+      mediaType: "text/markdown",
+      bytes,
+      sourceType: "persona-memory",
+      ownerAgentId: "alpha"
+    });
+    const sharedArtifact = await workspace.ingest({
+      roomId: room.id,
+      filename: "same.md",
+      mediaType: "text/markdown",
+      bytes
+    });
+
+    expect(sharedArtifact.id).not.toBe(privateArtifact.id);
+    expect(sharedArtifact.ownerAgentId).toBeUndefined();
+    expect(sharedArtifact.sourceType).toBe("upload");
+    expect(workspace.listArtifacts(room.id)).toHaveLength(2);
+    store.close();
+  });
+
   it("publishes extracted Markdown before optional model enrichment finishes", async () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-fast-markdown-"));
     roots.push(root);

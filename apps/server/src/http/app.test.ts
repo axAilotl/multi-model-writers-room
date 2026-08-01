@@ -51,7 +51,7 @@ class FixtureProvider implements ModelProvider {
     ];
   }
 
-  async getCapabilities(): Promise<ModelCapabilities | undefined> {
+  async getCapabilities(_modelId = ""): Promise<ModelCapabilities | undefined> {
     return (await this.listModels())[0]?.capabilities;
   }
 
@@ -63,6 +63,23 @@ class FixtureProvider implements ModelProvider {
     yield { type: "text-delta", text: "is a manifest." };
     yield { type: "usage", inputTokens: 100, outputTokens: 8, costUsd: 0.002 };
     yield { type: "done", finishReason: "stop" };
+  }
+}
+
+class ModelSwitchFixtureProvider extends FixtureProvider {
+  override async getCapabilities(modelId = ""): Promise<ModelCapabilities | undefined> {
+    const base = await super.getCapabilities(modelId);
+    if (!base) return undefined;
+    return modelId === "alternate/text"
+      ? {
+          ...base,
+          contextLength: 128_000,
+          toolCalling: false,
+          structuredOutput: false,
+          reasoningInputControl: false,
+          reasoningOutput: false
+        }
+      : base;
   }
 }
 
@@ -447,13 +464,16 @@ describe("local HTTP room seam", () => {
       .expect(201);
     expect(added.body.agent.capabilities.contextLength).toBe(1_200_000);
 
-    store.addAgent(room.id, {
+    const staleAgent = {
       ...added.body.agent,
       capabilities: {
         ...added.body.agent.capabilities,
         contextLength: 1
       }
-    });
+    };
+    store.database.prepare(
+      "UPDATE agents SET definition_json = ? WHERE id = ?"
+    ).run(JSON.stringify(staleAgent), staleAgent.id);
     await request(application)
       .post(`/api/v1/rooms/${room.id}/speakers/large-context-researcher`)
       .send({})
@@ -511,6 +531,40 @@ describe("local HTTP room seam", () => {
       })
       .expect(201);
     const templateId = created.body.template.id as string;
+    const room = store.createRoom({ title: "Template deletion room" });
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send({
+        ...created.body.template,
+        id: "invalid-template-link",
+        voiceTemplateId: "missing-template"
+      })
+      .expect(404);
+    expect(store.getSnapshot(room.id).agents).toEqual([]);
+    const linkedParticipant = await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send({
+        ...created.body.template,
+        id: "detached-after-delete",
+        voiceTemplateId: templateId,
+        name: "Client-supplied spoof",
+        systemPrompt: "Client-supplied prompt must not replace the saved voice."
+      })
+      .expect(201);
+    expect(linkedParticipant.body.agent).toMatchObject({
+      name: "Critic",
+      systemPrompt: "Challenge the draft.",
+      voiceTemplateId: templateId
+    });
+    await request(application)
+      .post(`/api/v1/rooms/${room.id}/agents`)
+      .send({
+        ...created.body.template,
+        id: "detached-after-delete",
+        voiceTemplateId: templateId
+      })
+      .expect(409);
+    expect(store.getSnapshot(room.id).agents).toHaveLength(1);
 
     const updated = await request(application)
       .patch(`/api/v1/voice-templates/${templateId}`)
@@ -533,6 +587,8 @@ describe("local HTTP room seam", () => {
       .get("/api/v1/voice-templates")
       .expect(200);
     expect(listed.body.templates).toEqual([]);
+    expect(store.getRoomAgent(room.id, "detached-after-delete").voiceTemplateId)
+      .toBeUndefined();
     store.close();
   });
 
@@ -542,7 +598,7 @@ describe("local HTTP room seam", () => {
     const store = new RoomStore(join(root, "room.db"));
     const application = createHttpApplication({
       store,
-      providers: new Map([["openrouter", new FixtureProvider()]])
+      providers: new Map([["openrouter", new ModelSwitchFixtureProvider()]])
     });
     const room = store.createRoom({ title: "Linked voice room" });
     const created = await request(application)
@@ -585,14 +641,24 @@ describe("local HTTP room seam", () => {
 
     await request(application)
       .patch(`/api/v1/voice-templates/${template.id}`)
-      .send({ name: "Renamed Voice" })
+      .send({ name: "Renamed Voice", modelId: "alternate/text" })
       .expect(200);
     const snapshot = await request(application)
       .get(`/api/v1/rooms/${room.id}`)
       .expect(200);
 
     expect(snapshot.body.agents).toMatchObject([
-      { id: "linked-critic", name: "Renamed Voice", voiceTemplateId: template.id }
+      {
+        id: "linked-critic",
+        name: "Renamed Voice",
+        modelId: "alternate/text",
+        voiceTemplateId: template.id,
+        capabilities: {
+          contextLength: 128_000,
+          toolCalling: false,
+          structuredOutput: false
+        }
+      }
     ]);
     expect(snapshot.body.messages).toMatchObject([
       { authorId: "linked-critic", content: "Existing message" }
@@ -600,7 +666,7 @@ describe("local HTTP room seam", () => {
     store.close();
   });
 
-  it("backfills legacy room voices from their uniquely matching template", () => {
+  it("does not link an independent voice merely because its prompt matches a template", () => {
     const root = mkdtempSync(join(tmpdir(), "writers-room-http-"));
     roots.push(root);
     const databasePath = join(root, "room.db");
@@ -648,12 +714,19 @@ describe("local HTTP room seam", () => {
 
     const reopenedStore = new RoomStore(databasePath);
     expect(reopenedStore.getRoomAgent(room.id, "legacy-reviewer")).toMatchObject({
-      voiceTemplateId: template.id,
-      name: "Canonical Name",
+      name: "Stale Room Name",
       modelId: "older/model-selection",
-      maxOutputTokens: 700,
-      contextBudget: template.contextBudget
+      maxOutputTokens: 300
     });
+    expect(reopenedStore.getRoomAgent(room.id, "legacy-reviewer").voiceTemplateId)
+      .toBeUndefined();
+    reopenedStore.updateVoiceTemplate(template.id, { name: "Another Template Name" });
+    expect(reopenedStore.getRoomAgent(room.id, "legacy-reviewer")).toMatchObject({
+      name: "Stale Room Name",
+      systemPrompt: template.systemPrompt
+    });
+    expect(reopenedStore.getRoomAgent(room.id, "legacy-reviewer").voiceTemplateId)
+      .toBeUndefined();
     reopenedStore.close();
   });
 
@@ -726,6 +799,19 @@ describe("local HTTP room seam", () => {
       .post(`/api/v1/rooms/${room.id}/speakers/reset-voice`)
       .send({ targetMessageId: human.id })
       .expect(201);
+    const transcriptBeforeReset = store.listMessages(room.id);
+    const lastBeforeReset = transcriptBeforeReset.at(-1)!;
+    store.createConversationEpisode({
+      roomId: room.id,
+      firstMessageId: human.id,
+      lastMessageId: lastBeforeReset.id,
+      firstSequence: human.sequence,
+      lastSequence: lastBeforeReset.sequence,
+      title: "Temporary episode",
+      summary: "This rolling episode should be cleared with the chat.",
+      tokenCount: 12,
+      sourceTokenCount: 24
+    });
     store.updateRuntime(room.id, "reset-voice", {
       fatigue: 0.8,
       activation: 0.7,
@@ -740,6 +826,7 @@ describe("local HTTP room seam", () => {
 
     expect(snapshot.messages).toEqual([]);
     expect(snapshot.generations).toEqual([]);
+    expect(snapshot.episodes).toEqual([]);
     expect(snapshot.activations).toEqual([]);
     expect(snapshot.agents).toMatchObject([{ id: "reset-voice" }]);
     expect(snapshot.artifacts).toMatchObject([{ filename: "keep.md" }]);
@@ -752,6 +839,212 @@ describe("local HTTP room seam", () => {
       consecutiveTurns: 0
     }]);
     await workspace.waitForEnrichment();
+    store.close();
+  });
+
+  it("skips credential-like files during repository directory ingestion", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-repo-safety-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: {
+        dimensions: 2,
+        embedDocuments: async texts => texts.map(() => new Float32Array([1, 0])),
+        embedQuery: async () => new Float32Array([1, 0])
+      },
+      housekeeping: { summarize: async () => ({ summary: "Repository file." }) }
+    });
+    const application = createHttpApplication({
+      store,
+      workspace,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const room = store.createRoom({ title: "Safe repository room" });
+
+    const response = await request(application)
+      .post(`/api/v1/rooms/${room.id}/repositories`)
+      .field("paths", JSON.stringify([".env", ".git/config", "src/okay.ts"]))
+      .attach("files", Buffer.from("credential fixture intentionally redacted"), {
+        filename: ".env",
+        contentType: "text/plain"
+      })
+      .attach("files", Buffer.from("[remote \"origin\"]\nurl=https://token@example.test/repo"), {
+        filename: "config",
+        contentType: "text/plain"
+      })
+      .attach("files", Buffer.from("export const safe = true;"), {
+        filename: "okay.ts",
+        contentType: "text/typescript"
+      })
+      .expect(201);
+
+    expect(response.body.artifacts).toMatchObject([{
+      filename: "src/okay.ts",
+      sourceType: "repository"
+    }]);
+    expect(response.body.failures).toMatchObject([
+      {
+        path: ".env",
+        error: expect.stringMatching(/credential|secret/i)
+      },
+      {
+        path: ".git/config",
+        error: expect.stringMatching(/credential|secret/i)
+      }
+    ]);
+    expect(workspace.listArtifacts(room.id).map(artifact => artifact.filename))
+      .toEqual(["src/okay.ts"]);
+    store.close();
+  });
+
+  it("manages a voice-template reference library and inherits it into new rooms", async () => {
+    const root = mkdtempSync(join(tmpdir(), "writers-room-voice-library-"));
+    roots.push(root);
+    const store = new RoomStore(join(root, "room.db"));
+    const workspace = new WorkspaceService({
+      store,
+      dataRoot: root,
+      embeddings: {
+        dimensions: 2,
+        embedDocuments: async texts => texts.map(() => new Float32Array([1, 0])),
+        embedQuery: async () => new Float32Array([1, 0])
+      },
+      housekeeping: { summarize: async () => ({ summary: "Voice reference." }) }
+    });
+    const application = createHttpApplication({
+      store,
+      workspace,
+      providers: new Map([["openrouter", new FixtureProvider()]])
+    });
+    const template = store.createVoiceTemplate({
+      title: "Grounded architect",
+      name: "Architect",
+      description: "Uses private interviews.",
+      provider: "openrouter",
+      modelId: "anthropic/claude-sonnet",
+      systemPrompt: "Ground claims in the private reference library.",
+      temperature: 0.5,
+      maxOutputTokens: 700,
+      reasoning: { enabled: false, displayMode: "hidden" },
+      tools: [],
+      contextBudget: {
+        softLimitTokens: 12_000,
+        hardLimitTokens: 16_000,
+        recentTranscriptTokens: 8_000,
+        retrievedContextTokens: 2_000,
+        notebookTokens: 0
+      }
+    });
+    const firstRoom = store.createRoom({ title: "First library room" });
+    await request(application)
+      .post(`/api/v1/rooms/${firstRoom.id}/agents`)
+      .send({ ...template, id: "architect-one", voiceTemplateId: template.id })
+      .expect(201);
+
+    const uploaded = await request(application)
+      .post(`/api/v1/voice-templates/${template.id}/library`)
+      .attach(
+        "file",
+        Buffer.from("# Interview\nFailure modes are design inputs."),
+        { filename: "architect-interview.md", contentType: "text/markdown" }
+      )
+      .expect(201);
+    expect(uploaded.body.failures).toEqual([]);
+    expect(uploaded.body.item).toMatchObject({
+      voiceTemplateId: template.id,
+      filename: "architect-interview.md"
+    });
+    expect(workspace.listArtifacts(firstRoom.id)).toMatchObject([{
+      ownerAgentId: "architect-one",
+      sourceType: "persona-memory",
+      voiceTemplateLibraryItemId: uploaded.body.item.id
+    }]);
+    const managedArtifact = workspace.listArtifacts(firstRoom.id)[0]!;
+    const blockedDelete = await request(application)
+      .delete(`/api/v1/rooms/${firstRoom.id}/artifacts/${managedArtifact.id}`)
+      .expect(409);
+    expect(blockedDelete.body.error).toMatch(/Voice Settings/i);
+    expect(workspace.listArtifacts(firstRoom.id)).toHaveLength(1);
+
+    const secondRoom = store.createRoom({ title: "Second library room" });
+    const inherited = await request(application)
+      .post(`/api/v1/rooms/${secondRoom.id}/agents`)
+      .send({ ...template, id: "architect-two", voiceTemplateId: template.id })
+      .expect(201);
+    expect(inherited.body.libraryFailures).toEqual([]);
+    expect(workspace.listArtifacts(secondRoom.id)).toMatchObject([{
+      ownerAgentId: "architect-two",
+      voiceTemplateLibraryItemId: uploaded.body.item.id
+    }]);
+    expect((await request(application)
+      .get(`/api/v1/voice-templates/${template.id}/library`)
+      .expect(200)).body.items).toHaveLength(1);
+
+    const originalIngest = workspace.ingest.bind(workspace);
+    let retryCalls = 0;
+    const retrySpy = vi.spyOn(workspace, "ingest").mockImplementation(async input => {
+      retryCalls += 1;
+      if (retryCalls === 2) {
+        return originalIngest({
+          ...input,
+          filename: "forced-retry-failure.bin",
+          mediaType: "application/octet-stream"
+        });
+      }
+      return originalIngest(input);
+    });
+    const rejectedRetry = await request(application)
+      .post(`/api/v1/voice-templates/${template.id}/library`)
+      .attach(
+        "file",
+        Buffer.from("# Interview\nFailure modes are design inputs."),
+        { filename: "architect-interview.md", contentType: "text/markdown" }
+      )
+      .expect(500);
+    retrySpy.mockRestore();
+    expect(rejectedRetry.body.error).toMatch(/is saved/i);
+    expect(store.listVoiceTemplateLibraryItems(template.id)).toHaveLength(1);
+    expect(workspace.listArtifacts(firstRoom.id)).toHaveLength(1);
+    expect(workspace.listArtifacts(secondRoom.id)).toHaveLength(1);
+
+    let materializationCalls = 0;
+    const ingestSpy = vi.spyOn(workspace, "ingest").mockImplementation(async input => {
+      materializationCalls += 1;
+      if (materializationCalls === 2) {
+        return originalIngest({
+          ...input,
+          filename: "forced-failure.bin",
+          mediaType: "application/octet-stream"
+        });
+      }
+      return originalIngest(input);
+    });
+    const rejectedUpload = await request(application)
+      .post(`/api/v1/voice-templates/${template.id}/library`)
+      .attach(
+        "file",
+        Buffer.from("This source must be attached everywhere or nowhere."),
+        { filename: "atomic-reference.txt", contentType: "text/plain" }
+      )
+      .expect(500);
+    ingestSpy.mockRestore();
+    expect(rejectedUpload.body.error).toMatch(/not saved/i);
+    expect(store.listVoiceTemplateLibraryItems(template.id)).toHaveLength(1);
+    expect(workspace.listArtifacts(firstRoom.id).some(
+      artifact => artifact.filename === "atomic-reference.txt"
+    )).toBe(false);
+    expect(workspace.listArtifacts(secondRoom.id).some(
+      artifact => artifact.voiceTemplateLibraryItemId !== uploaded.body.item.id
+    )).toBe(false);
+
+    await request(application)
+      .delete(`/api/v1/voice-templates/${template.id}/library/${uploaded.body.item.id}`)
+      .expect(200);
+    expect(store.listVoiceTemplateLibraryItems(template.id)).toEqual([]);
+    expect(workspace.listArtifacts(firstRoom.id)).toEqual([]);
+    expect(workspace.listArtifacts(secondRoom.id)).toEqual([]);
     store.close();
   });
 
@@ -1016,6 +1309,11 @@ describe("local HTTP room seam", () => {
     };
     store.addAgent(firstRoom.id, agent);
     store.addAgent(secondRoom.id, agent);
+    const thirdRoom = store.createRoom({ title: "Third room" });
+    expect(() => store.addAgent(thirdRoom.id, {
+      ...agent,
+      name: "Different voice reusing the ID"
+    })).toThrow(/already used/i);
 
     const removed = await request(application)
       .delete(`/api/v1/rooms/${firstRoom.id}/agents/${agent.id}`)

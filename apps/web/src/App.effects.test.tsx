@@ -11,6 +11,8 @@ const room = {
   status: "running" as const,
   settings: {
     autoMode: true,
+    conversationStyle: "conversation" as const,
+    deliberationTurns: 1,
     maxResponders: 2,
     maxAutonomousWaves: 3,
     maxAutonomousReplies: 6,

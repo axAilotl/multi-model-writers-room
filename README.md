@@ -11,7 +11,7 @@
 <p align="center">
   <img alt="Node 22+" src="https://img.shields.io/badge/Node-22%2B-339933?logo=nodedotjs&logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/storage-local--first-5b5bd6">
-  <img alt="License not yet granted" src="https://img.shields.io/badge/license-not%20yet%20granted-lightgrey">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
 ```bash
@@ -40,6 +40,16 @@ other, remain silent, or take several bounded autonomous turns.
 | Inspectable generations | Streaming output, provider reasoning when available, retrieved sources, tool calls, tokens, latency, and cost |
 | Durable rooms | SQLite-backed rooms, transcripts, agents, settings, runtime state, artifacts, scratchpad notes, and generation events |
 | Human control | Pause, invite a speaker, mute or remove a participant, switch/delete rooms, reset chat while retaining the room, and cap autonomous waves |
+
+Four room formats provide meaningful behavior bundles rather than cosmetic
+presets:
+
+| Format | Pace and routing |
+| --- | --- |
+| Workshop | Normal conversational pace with balanced speaker routing |
+| Writers’ Room | Fast, interruptible crosstalk and rapid idea mutation |
+| Shark Tank | Present, steelman, challenge, defend, and rebut |
+| Fishbowl | One voice at a time with private, evidence-grounded study drafts before the public answer |
 
 ## Quick start
 
@@ -82,6 +92,11 @@ speaker arbiter then applies direct-address priority and a deterministic
 Framework. Fatigue, room pressure, responder limits, wave limits, and reply
 limits prevent dogpiles and infinite model-to-model loops.
 
+If every eligible voice defers on a new human message, Auto mode explicitly
+selects one balanced fallback speaker so the room does not appear dead. The UI
+labels that admission as a scheduler fallback and preserves the participant's
+original activation decision separately.
+
 An explicit `@Voice Name` directs the message only to that participant. Manual
 Invite bypasses ordinary activation selection but still uses the normal
 generation and persistence path.
@@ -104,6 +119,32 @@ and capabilities, never API keys.
 The Settings page lets you choose the fallback model, inspect provider model
 catalogs, tune room pacing, and build reusable voice templates. Voice templates
 can also be generated as editable drafts from a name and source text.
+
+Each saved voice also owns a private reference library in Voice Settings.
+Markdown, text, and PDF references can be uploaded, inspected, and removed
+there. Uploading through a linked participant's Library control adds to the same
+template library; existing room instances receive it and future instances
+inherit it automatically. Materialized evidence remains private to that voice.
+
+### Model-aware context and rolling history
+
+New voices auto-scale their working context from the selected model's reported
+capabilities. Models at or below the 128k class use up to 128k; models in the
+256k class use up to 256k; very-large-context models use a 256k working window
+with a 512k hard ceiling. The automatic working budget is divided in a
+normalized 1:2:3 ratio: one-sixth for system/persona instructions, one-third
+for table and persona-library evidence, and one-half for the live transcript.
+The Voice Template editor exposes an Auto-scale switch and manual limits for
+rooms that need a different policy.
+
+At 70% of a participant's transcript allotment, Writers’ Room creates a durable
+conversation episode and substitutes that summary for covered raw turns in
+that participant's next prompt. Compaction is participant-aware: a 128k voice
+cannot force a 256k voice to shed raw context early. The original messages are
+never replaced or deleted; they remain in SQLite and can be recovered by models
+with `search_conversation_history` and `read_message_range`. Chat Reset is the
+explicit operation that clears transcript and episode history while preserving
+participants and table artifacts.
 
 ## Architecture
 
@@ -133,7 +174,15 @@ can also be generated as editable drafts from a name and source text.
 The prompt contains a compact workspace manifest, not every document. Agents
 retrieve specific evidence through read-only tools. Markdown and text files are
 processed locally; PDF text is structurally extracted. Retrieval combines FTS5
-with local embeddings and preserves chunk provenance for citations.
+with local embeddings and preserves chunk provenance for citations. Repository
+directories are indexed as a bounded read-only corpus: participants ask the
+Table Researcher for cited answers rather than receiving or searching raw
+repository contents directly. This bounded utility is always available to
+tool-capable room participants; when synthesis is enabled it uses the fallback model selected by
+the human, but it never receives private persona-library material. A saved
+voice's interviews, excerpts, and other grounding material belong to its
+template and are materialized into private, indexed room artifacts that are not
+exposed to other voices.
 
 ## Data and privacy
 
@@ -204,7 +253,7 @@ endpoint.
 - Single local human; no multi-user authentication or authorization
 - No cloud deployment hardening
 - No arbitrary source-code mutation, repository shell, or general agent execution
-- No room branches, private agent notebooks, image understanding, or audio ingestion yet
+- No room branches, general-purpose private notebooks, image understanding, or audio ingestion yet
 - Provider reasoning is shown only when the provider actually returns it
 - Local embeddings may download model assets on first ingestion
 - Linux is the tested platform for this alpha release
@@ -223,6 +272,10 @@ in.
 Provider-returned reasoning is stored separately for human inspection and is
 not treated as another model’s public context.
 
+**Does compaction delete old chat?** No. It only changes the bounded prompt sent
+to an individual model. Episode summaries carry their source message range, and
+the complete raw transcript remains searchable in SQLite.
+
 **Are documents copied into every prompt?** No. Agents receive a manifest and
 retrieve relevant chunks through read-only workspace tools.
 
@@ -235,7 +288,4 @@ read-oriented and cannot silently mutate code or uploaded documents.
 
 ## License
 
-No software license has been granted yet. The repository is publicly readable,
-but public visibility alone does not grant permission to copy, modify, or
-redistribute the code. Add an explicit license before treating this as an
-open-source project.
+Licensed under the [MIT License](LICENSE).

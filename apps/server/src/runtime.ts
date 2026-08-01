@@ -123,10 +123,11 @@ export async function startRuntime(input?: {
     embeddings: input?.workspaceModels?.embeddings ?? localModels,
     housekeeping: input?.workspaceModels?.housekeeping ?? extractiveHousekeepingModel
   });
-  const tools = new RoomToolExecutor(store, workspace);
+  const providers = input?.providers ?? providerRegistry();
+  const tools = new RoomToolExecutor(store, workspace, providers);
   const app = createHttpApplication({
     store,
-    providers: input?.providers ?? providerRegistry(),
+    providers,
     workspace,
     tools
   });

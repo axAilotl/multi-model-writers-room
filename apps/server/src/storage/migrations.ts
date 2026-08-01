@@ -194,6 +194,113 @@ const migrations: ReadonlyArray<(database: Database.Database) => void> = [
         updated_at TEXT NOT NULL
       );
     `);
+  },
+  database => {
+    // Artifact identity is no longer the same thing as blob identity. Two
+    // persona libraries may independently own the same bytes while the blob
+    // store still deduplicates those bytes by SHA-256.
+    database.exec(`
+      CREATE TABLE artifacts_without_blob_identity (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        sha256 TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO artifacts_without_blob_identity(
+        id, room_id, sha256, payload_json, created_at, updated_at
+      )
+      SELECT id, room_id, sha256, payload_json, created_at, updated_at
+      FROM artifacts;
+      DROP TABLE artifacts;
+      ALTER TABLE artifacts_without_blob_identity RENAME TO artifacts;
+      CREATE INDEX artifacts_room_updated ON artifacts(room_id, updated_at);
+      CREATE INDEX artifacts_room_sha ON artifacts(room_id, sha256);
+    `);
+  },
+  database => {
+    database.exec(`
+      CREATE TABLE conversation_episodes (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        first_sequence INTEGER NOT NULL,
+        last_sequence INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(room_id, first_sequence, last_sequence)
+      );
+      CREATE INDEX conversation_episodes_room_sequence
+      ON conversation_episodes(room_id, last_sequence);
+    `);
+  },
+  database => {
+    database.exec(`
+      CREATE TABLE voice_template_library_items (
+        id TEXT PRIMARY KEY,
+        voice_template_id TEXT NOT NULL REFERENCES voice_templates(id) ON DELETE CASCADE,
+        sha256 TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(voice_template_id, sha256)
+      );
+      CREATE INDEX voice_template_library_template
+      ON voice_template_library_items(voice_template_id, updated_at DESC);
+      CREATE INDEX voice_template_library_sha
+      ON voice_template_library_items(sha256);
+    `);
+  },
+  database => {
+    database.exec(`
+      CREATE VIRTUAL TABLE messages_fts USING fts5(
+        message_id UNINDEXED,
+        room_id UNINDEXED,
+        text,
+        tokenize='unicode61'
+      );
+      INSERT INTO messages_fts(message_id, room_id, text)
+      SELECT id, room_id, json_extract(payload_json, '$.content') FROM messages
+      WHERE json_extract(payload_json, '$.status') <> 'streaming';
+      CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages
+      WHEN json_extract(new.payload_json, '$.status') <> 'streaming' BEGIN
+        INSERT INTO messages_fts(message_id, room_id, text)
+        VALUES (new.id, new.room_id, json_extract(new.payload_json, '$.content'));
+      END;
+      CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        DELETE FROM messages_fts WHERE message_id = old.id;
+      END;
+      CREATE TRIGGER messages_fts_au AFTER UPDATE OF payload_json ON messages BEGIN
+        DELETE FROM messages_fts WHERE message_id = old.id;
+        INSERT INTO messages_fts(message_id, room_id, text)
+        SELECT new.id, new.room_id, json_extract(new.payload_json, '$.content')
+        WHERE json_extract(new.payload_json, '$.status') <> 'streaming';
+      END;
+    `);
+  },
+  database => {
+    // Version 8 replaces the first FTS triggers for databases that briefly ran
+    // version 7 during development. Streaming deltas must not rebuild the FTS
+    // row on every token.
+    database.exec(`
+      DROP TRIGGER IF EXISTS messages_fts_ai;
+      DROP TRIGGER IF EXISTS messages_fts_ad;
+      DROP TRIGGER IF EXISTS messages_fts_au;
+      CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages
+      WHEN json_extract(new.payload_json, '$.status') <> 'streaming' BEGIN
+        INSERT INTO messages_fts(message_id, room_id, text)
+        VALUES (new.id, new.room_id, json_extract(new.payload_json, '$.content'));
+      END;
+      CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        DELETE FROM messages_fts WHERE message_id = old.id;
+      END;
+      CREATE TRIGGER messages_fts_au AFTER UPDATE OF payload_json ON messages BEGIN
+        DELETE FROM messages_fts WHERE message_id = old.id;
+        INSERT INTO messages_fts(message_id, room_id, text)
+        SELECT new.id, new.room_id, json_extract(new.payload_json, '$.content')
+        WHERE json_extract(new.payload_json, '$.status') <> 'streaming';
+      END;
+    `);
   }
 ];
 
@@ -211,11 +318,23 @@ export function migrate(database: Database.Database): void {
   migrations.forEach((migration, index) => {
     const version = index + 1;
     if (applied.has(version)) return;
-    database.transaction(() => {
-      migration(database);
-      database.prepare(
-        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
-      ).run(version, new Date().toISOString());
-    })();
+    const rebuildsReferencedTable = version === 4;
+    if (rebuildsReferencedTable) database.pragma("foreign_keys = OFF");
+    try {
+      database.transaction(() => {
+        migration(database);
+        if (rebuildsReferencedTable) {
+          const violations = database.pragma("foreign_key_check") as unknown[];
+          if (violations.length > 0) {
+            throw new Error("Artifact identity migration broke foreign keys");
+          }
+        }
+        database.prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
+        ).run(version, new Date().toISOString());
+      })();
+    } finally {
+      if (rebuildsReferencedTable) database.pragma("foreign_keys = ON");
+    }
   });
 }

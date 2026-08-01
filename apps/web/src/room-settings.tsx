@@ -7,6 +7,7 @@ import {
 } from "@writers-room/contracts";
 import { api } from "./api.js";
 import { validationMessage } from "./validation.js";
+import { applyRoomMode, roomModeOptions } from "./room-modes.js";
 
 export function RoomSettingsEditor({
   room,
@@ -59,6 +60,33 @@ export function RoomSettingsEditor({
         </div>
       </div>
       <div className="settings-card settings-grid">
+        <label>
+          Room format
+          <select
+            value={settings.conversationStyle}
+            onChange={event => setSettings(current => applyRoomMode(
+              current,
+              event.target.value as RoomSettings["conversationStyle"]
+            ))}
+          >
+            {roomModeOptions.map(option => (
+              <option value={option.value} key={option.value}>
+                {option.label} — {option.description}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Deliberation passes
+          <input
+            type="number"
+            min={1}
+            max={3}
+            value={settings.deliberationTurns}
+            onChange={event => update("deliberationTurns", Number(event.target.value))}
+          />
+          <small>Fishbowl uses private application-level drafts before the public answer.</small>
+        </label>
         <label className="setting-toggle">
           <span><strong>Automatic conversation</strong><small>Let the scheduler select speakers after human messages.</small></span>
           <input

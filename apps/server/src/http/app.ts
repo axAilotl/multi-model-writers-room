@@ -10,6 +10,10 @@ import {
   voiceTemplateInputSchema,
   voiceTemplatePatchSchema
 } from "@writers-room/contracts";
+import type {
+  VoiceTemplateLibraryItem,
+  WorkspaceArtifact
+} from "@writers-room/contracts";
 import type { ModelProvider } from "../providers/model-provider.js";
 import { RoomEngine } from "../room/room-engine.js";
 import { ParticipantModelActivationEvaluator } from "../scheduler/activation-evaluator.js";
@@ -35,7 +39,8 @@ const createRoomSchema = z.object({
 const createMessageSchema = z.object({
   content: z.string().trim().min(1).max(200_000),
   mentionedAgentIds: z.array(z.string()).default([]),
-  attachmentIds: z.array(z.string()).default([])
+  attachmentIds: z.array(z.string()).default([]),
+  replyToMessageId: z.string().min(1).optional()
 });
 
 const speakerSchema = z.object({
@@ -43,6 +48,89 @@ const speakerSchema = z.object({
 });
 
 const VOICE_GENERATION_TIMEOUT_MS = 5 * 60_000;
+const MAX_REPOSITORY_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+const repositoryUploadTotals = new WeakMap<object, number>();
+const repositoryStorage: multer.StorageEngine = {
+  _handleFile(request, file, callback) {
+    const chunks: Buffer[] = [];
+    let fileBytes = 0;
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      file.stream.resume();
+      callback(error);
+    };
+    file.stream.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      const nextTotal = (repositoryUploadTotals.get(request) ?? 0) + chunk.byteLength;
+      if (nextTotal > MAX_REPOSITORY_UPLOAD_BYTES) {
+        fail(Object.assign(
+          new Error("Repository upload exceeds 100 MB"),
+          { status: 413 }
+        ));
+        return;
+      }
+      repositoryUploadTotals.set(request, nextTotal);
+      fileBytes += chunk.byteLength;
+      chunks.push(chunk);
+    });
+    file.stream.once("error", fail);
+    file.stream.once("end", () => {
+      if (settled) return;
+      settled = true;
+      callback(null, { buffer: Buffer.concat(chunks), size: fileBytes });
+    });
+  },
+  _removeFile(_request, _file, callback) {
+    callback(null);
+  }
+};
+
+function repositoryPath(value: string): string {
+  const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "");
+  const segments = normalized.split("/");
+  if (
+    !normalized ||
+    normalized.length > 500 ||
+    normalized.startsWith("/") ||
+    /^[a-zA-Z]:\//.test(normalized) ||
+    segments.some(segment => !segment || segment === "." || segment === "..")
+  ) {
+    throw new Error(`Invalid repository-relative path: ${value}`);
+  }
+  return normalized;
+}
+
+function assertRepositoryFileSafe(path: string, bytes: Buffer): void {
+  const segments = path.toLowerCase().split("/");
+  const filename = segments.at(-1)!;
+  const blockedDirectories = new Set([
+    ".aws", ".git", ".gnupg", ".hg", ".ssh", ".svn",
+    ".next", "build", "coverage", "dist", "node_modules", "target", "vendor"
+  ]);
+  const blockedNames = new Set([
+    ".env", ".netrc", ".npmrc", ".pypirc", "credentials",
+    "credentials.json", "id_dsa", "id_ed25519", "id_rsa"
+  ]);
+  if (
+    segments.some(segment => blockedDirectories.has(segment)) ||
+    blockedNames.has(filename) ||
+    filename.startsWith(".env.") ||
+    /(?:^|\.)(?:key|p12|pfx)$/.test(filename) ||
+    /(?:^|[._-])secrets?(?:[._-]|$)/.test(filename)
+  ) {
+    throw new Error("Skipped a credential or secret file");
+  }
+  const sample = bytes.toString("utf8");
+  if (
+    /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/.test(sample) ||
+    /\bsk-or-v1-[A-Za-z0-9_-]{20,}\b/.test(sample)
+  ) {
+    throw new Error("Skipped a file containing credential-like material");
+  }
+}
 
 function asyncRoute(
   handler: (request: express.Request, response: express.Response) => Promise<void>
@@ -64,6 +152,117 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     storage: multer.memoryStorage(),
     limits: { fileSize: 50 * 1024 * 1024, files: 1 }
   });
+  const repositoryUpload = multer({
+    storage: repositoryStorage,
+    limits: { fileSize: 10 * 1024 * 1024, files: 500, fields: 4 }
+  });
+  async function materializeVoiceReference(
+    item: VoiceTemplateLibraryItem,
+    memberships = options.store.listVoiceTemplateMemberships(item.voiceTemplateId)
+  ): Promise<{
+    artifacts: WorkspaceArtifact[];
+    failures: Array<{ roomId: string; agentId: string; error: string }>;
+  }> {
+    if (!options.workspace) return { artifacts: [], failures: [] };
+    const bytes = options.workspace.readReferenceBlob(item.sha256);
+    const artifacts: WorkspaceArtifact[] = [];
+    const failures: Array<{ roomId: string; agentId: string; error: string }> = [];
+    for (const membership of memberships) {
+      try {
+        artifacts.push(await options.workspace.ingest({
+          roomId: membership.roomId,
+          filename: item.filename,
+          mediaType: item.mediaType,
+          bytes,
+          sourceType: "persona-memory",
+          ownerAgentId: membership.agentId,
+          voiceTemplateLibraryItemId: item.id
+        }));
+      } catch (error) {
+        for (const artifact of options.workspace.listArtifacts(membership.roomId)) {
+          if (
+            artifact.ownerAgentId === membership.agentId &&
+            artifact.voiceTemplateLibraryItemId === item.id &&
+            artifact.ingestionStatus === "failed"
+          ) {
+            options.workspace.deleteArtifact(membership.roomId, artifact.id, {
+              allowTemplateManaged: true
+            });
+          }
+        }
+        failures.push({
+          ...membership,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return { artifacts, failures };
+  }
+
+  async function addVoiceReference(
+    templateId: string,
+    file: Express.Multer.File
+  ) {
+    options.store.getVoiceTemplate(templateId);
+    if (!options.workspace) throw new Error("Workspace service is unavailable");
+    const description = await options.workspace.describeReferenceSource({
+      filename: file.originalname,
+      mediaType: file.mimetype,
+      bytes: file.buffer
+    });
+    const sha256 = options.workspace.storeReferenceBlob(file.buffer);
+    const existingItem = options.store.listVoiceTemplateLibraryItems(templateId)
+      .find(candidate => candidate.sha256 === sha256);
+    const item = existingItem ?? options.store.createVoiceTemplateLibraryItem({
+        voiceTemplateId: templateId,
+        filename: file.originalname,
+        mediaType: file.mimetype,
+        sha256,
+        byteSize: file.size,
+        summary: description.summary,
+        ...(description.outline === undefined ? {} : { outline: description.outline })
+      });
+    const materialized = await materializeVoiceReference(item);
+    if (materialized.failures.length > 0) {
+      if (!existingItem) {
+        for (const artifact of materialized.artifacts) {
+          options.workspace.deleteArtifact(artifact.roomId, artifact.id, {
+            allowTemplateManaged: true
+          });
+        }
+        options.store.deleteVoiceTemplateLibraryItem(templateId, item.id);
+        options.workspace.garbageCollectBlobs([item.sha256]);
+      }
+      const locations = materialized.failures
+        .map(failure => `${failure.roomId}/${failure.agentId}: ${failure.error}`)
+        .join("; ");
+      throw new Error(
+        `${existingItem ? "Reference is saved, but still" : "Reference was not saved because it"} ` +
+        `could not be attached everywhere: ${locations}`
+      );
+    }
+    return { item, ...materialized };
+  }
+
+  function removeVoiceReference(templateId: string, itemId: string) {
+    const item = options.store.getVoiceTemplateLibraryItem(itemId);
+    if (item.voiceTemplateId !== templateId) {
+      throw new Error("Voice reference does not belong to this template");
+    }
+    if (options.workspace) {
+      for (const room of options.store.listRooms()) {
+        for (const artifact of options.workspace.listArtifacts(room.id)) {
+          if (artifact.voiceTemplateLibraryItemId !== item.id) continue;
+          options.workspace.deleteArtifact(room.id, artifact.id, {
+            allowTemplateManaged: true
+          });
+        }
+      }
+    }
+    const deleted = options.store.deleteVoiceTemplateLibraryItem(templateId, itemId);
+    options.workspace?.garbageCollectBlobs([deleted.sha256]);
+    return deleted;
+  }
   application.disable("x-powered-by");
   application.use(cors({ origin: /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/ }));
   const standardJson = express.json({ limit: "2mb" });
@@ -204,22 +403,97 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     })
   );
 
-  application.patch("/api/v1/voice-templates/:templateId", (request, response) => {
-    const patch = voiceTemplatePatchSchema.parse(request.body);
-    response.json({
-      template: options.store.updateVoiceTemplate(
-        String(request.params.templateId),
-        patch
-      )
-    });
-  });
+  application.patch(
+    "/api/v1/voice-templates/:templateId",
+    asyncRoute(async (request, response) => {
+      const templateId = String(request.params.templateId);
+      const patch = voiceTemplatePatchSchema.parse(request.body);
+      const current = options.store.getVoiceTemplate(templateId);
+      const providerChanged = patch.provider !== undefined &&
+        patch.provider !== current.provider;
+      const modelChanged = patch.modelId !== undefined &&
+        patch.modelId !== current.modelId;
+      let capabilities;
+      if (providerChanged || modelChanged) {
+        const providerId = patch.provider ?? current.provider;
+        const modelId = patch.modelId ?? current.modelId;
+        const provider = options.providers.get(providerId);
+        if (!provider) {
+          response.status(400).json({
+            error: `Provider is not configured: ${providerId}`
+          });
+          return;
+        }
+        capabilities = await provider.getCapabilities(modelId).catch(() => undefined);
+        if (!capabilities) {
+          response.status(400).json({
+            error: `Model capabilities are unavailable: ${modelId}`
+          });
+          return;
+        }
+        if (!capabilities.textInput) {
+          response.status(400).json({
+            error: `Model cannot accept text input: ${modelId}`
+          });
+          return;
+        }
+      }
+      response.json({
+        template: options.store.updateVoiceTemplate(templateId, patch, capabilities)
+      });
+    })
+  );
 
   application.delete("/api/v1/voice-templates/:templateId", (request, response) => {
+    const templateId = String(request.params.templateId);
+    for (const item of options.store.listVoiceTemplateLibraryItems(templateId)) {
+      removeVoiceReference(templateId, item.id);
+    }
     const template = options.store.deleteVoiceTemplate(
-      String(request.params.templateId)
+      templateId
     );
     response.json({ deleted: true, template });
   });
+
+  if (options.workspace) {
+    application.get(
+      "/api/v1/voice-templates/:templateId/library",
+      (request, response) => {
+        response.json({
+          items: options.store.listVoiceTemplateLibraryItems(
+            String(request.params.templateId)
+          )
+        });
+      }
+    );
+
+    application.post(
+      "/api/v1/voice-templates/:templateId/library",
+      upload.single("file"),
+      asyncRoute(async (request, response) => {
+        if (!request.file) {
+          response.status(400).json({ error: "A reference file is required" });
+          return;
+        }
+        const result = await addVoiceReference(
+          String(request.params.templateId),
+          request.file
+        );
+        response.status(201).json(result);
+      })
+    );
+
+    application.delete(
+      "/api/v1/voice-templates/:templateId/library/:itemId",
+      (request, response) => {
+        const item = removeVoiceReference(
+          String(request.params.templateId),
+          String(request.params.itemId)
+        );
+        response.json({ deleted: true, item });
+      }
+    );
+  }
 
   application.get("/api/v1/rooms", (_request, response) => {
     response.json({ rooms: options.store.listRooms() });
@@ -293,31 +567,93 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
     "/api/v1/rooms/:roomId/agents",
     asyncRoute(async (request, response) => {
       const submitted = agentDefinitionSchema.parse(request.body);
-      const provider = options.providers.get(submitted.provider);
+      const linkedTemplate = submitted.voiceTemplateId
+        ? options.store.getVoiceTemplate(submitted.voiceTemplateId)
+        : undefined;
+      const canonical = linkedTemplate
+        ? agentDefinitionSchema.parse({
+            ...submitted,
+            name: linkedTemplate.name,
+            description: linkedTemplate.description,
+            provider: linkedTemplate.provider,
+            modelId: linkedTemplate.modelId,
+            systemPrompt: linkedTemplate.systemPrompt,
+            personaPrompt: linkedTemplate.personaPrompt,
+            temperature: linkedTemplate.temperature,
+            topP: linkedTemplate.topP,
+            maxOutputTokens: linkedTemplate.maxOutputTokens,
+            reasoning: linkedTemplate.reasoning,
+            tools: linkedTemplate.tools,
+            contextBudget: linkedTemplate.contextBudget
+          })
+        : submitted;
+      const provider = options.providers.get(canonical.provider);
       if (!provider) {
         response.status(400).json({
-          error: `Provider is not configured: ${submitted.provider}`
+          error: `Provider is not configured: ${canonical.provider}`
         });
         return;
       }
-      const capabilities = await provider.getCapabilities(submitted.modelId)
+      const capabilities = await provider.getCapabilities(canonical.modelId)
         .catch(() => undefined);
       if (capabilities === undefined) {
         response.status(400).json({
-          error: `Model capabilities are unavailable: ${submitted.modelId}`
+          error: `Model capabilities are unavailable: ${canonical.modelId}`
         });
         return;
       }
-      const { capabilities: _clientCapabilities, ...definition } = submitted;
+      if (!capabilities.textInput) {
+        response.status(400).json({
+          error: `Model cannot accept text input: ${canonical.modelId}`
+        });
+        return;
+      }
+      const { capabilities: _clientCapabilities, ...definition } = canonical;
       const agent = agentDefinitionSchema.parse({
         ...definition,
         ...(capabilities === undefined ? {} : { capabilities })
       });
       const roomId = String(request.params.roomId);
+      const templateLibraryItems = agent.voiceTemplateId
+        ? options.store.listVoiceTemplateLibraryItems(agent.voiceTemplateId)
+        : [];
+      if (templateLibraryItems.length > 0 && !options.workspace) {
+        throw new Error(
+          "This voice has private references, but the workspace service is unavailable"
+        );
+      }
       const added = options.store.addAgent(roomId, agent);
+      const libraryFailures: Array<{ roomId: string; agentId: string; error: string }> = [];
+      if (added.voiceTemplateId && options.workspace) {
+        for (const item of templateLibraryItems) {
+          const result = await materializeVoiceReference(item, [{
+            roomId,
+            agentId: added.id
+          }]);
+          libraryFailures.push(...result.failures);
+        }
+      }
+      if (libraryFailures.length > 0 && options.workspace) {
+        for (const artifact of options.workspace.listArtifacts(roomId)) {
+          if (
+            artifact.ownerAgentId === added.id &&
+            artifact.voiceTemplateLibraryItemId
+          ) {
+            options.workspace.deleteArtifact(roomId, artifact.id, {
+              allowTemplateManaged: true
+            });
+          }
+        }
+        options.store.removeAgent(roomId, added.id);
+        throw new Error(
+          `Participant was not added because private references could not be attached: ${
+            libraryFailures.map(failure => failure.error).join("; ")
+          }`
+        );
+      }
       const room = options.store.getRoom(roomId);
       options.store.appendRoomEvent(room.id, { type: "room.snapshot", room });
-      response.status(201).json({ agent: added });
+      response.status(201).json({ agent: added, libraryFailures });
     })
   );
 
@@ -328,6 +664,15 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       const agentId = String(request.params.agentId);
       options.store.getRoomAgent(roomId, agentId);
       engine.interruptAgent(roomId, agentId);
+      if (options.workspace) {
+        for (const artifact of options.workspace.listArtifacts(roomId)) {
+          if (artifact.ownerAgentId === agentId) {
+            options.workspace.deleteArtifact(roomId, artifact.id, {
+              allowTemplateManaged: true
+            });
+          }
+        }
+      }
       const agent = options.store.removeAgent(roomId, agentId);
       const room = options.store.getRoom(roomId);
       options.store.appendRoomEvent(room.id, { type: "room.snapshot", room });
@@ -343,7 +688,10 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       authorId: "human",
       content: input.content,
       mentionedAgentIds: input.mentionedAgentIds,
-      attachmentIds: input.attachmentIds
+      attachmentIds: input.attachmentIds,
+      ...(input.replyToMessageId === undefined
+        ? {}
+        : { replyToMessageId: input.replyToMessageId })
     });
     response.status(201).json({ message });
     const room = options.store.getRoom(message.roomId);
@@ -462,13 +810,85 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
           response.status(400).json({ error: "A file is required" });
           return;
         }
+        const ownerAgentId = z.string().trim().min(1).optional()
+          .parse(request.body.ownerAgentId || undefined);
+        if (ownerAgentId !== undefined) {
+          const owner = options.store.getRoomAgent(
+            String(request.params.roomId),
+            ownerAgentId
+          );
+          if (owner.voiceTemplateId) {
+            const result = await addVoiceReference(owner.voiceTemplateId, request.file);
+            const artifact = result.artifacts.find(candidate =>
+              candidate.roomId === String(request.params.roomId) &&
+              candidate.ownerAgentId === ownerAgentId
+            );
+            if (!artifact) {
+              throw new Error(
+                result.failures.find(failure =>
+                  failure.roomId === String(request.params.roomId) &&
+                  failure.agentId === ownerAgentId
+                )?.error ?? "Could not materialize the voice reference"
+              );
+            }
+            response.status(201).json({ artifact, libraryItem: result.item });
+            return;
+          }
+        }
         const artifact = await options.workspace!.ingest({
           roomId: String(request.params.roomId),
           filename: request.file.originalname,
           mediaType: request.file.mimetype,
-          bytes: request.file.buffer
+          bytes: request.file.buffer,
+          ...(ownerAgentId === undefined
+            ? {}
+            : { sourceType: "persona-memory", ownerAgentId })
         });
         response.status(201).json({ artifact });
+      })
+    );
+
+    application.post(
+      "/api/v1/rooms/:roomId/repositories",
+      repositoryUpload.array("files", 500),
+      asyncRoute(async (request, response) => {
+        const files = (request.files ?? []) as Express.Multer.File[];
+        const paths = z.array(z.string()).parse(
+          JSON.parse(z.string().parse(request.body.paths ?? "[]"))
+        );
+        if (files.length === 0 || files.length !== paths.length) {
+          response.status(400).json({
+            error: "Repository upload requires one relative path per file"
+          });
+          return;
+        }
+        const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+        if (totalBytes > MAX_REPOSITORY_UPLOAD_BYTES) {
+          response.status(413).json({ error: "Repository upload exceeds 100 MB" });
+          return;
+        }
+        const artifacts = [];
+        const failures: Array<{ path: string; error: string }> = [];
+        for (const [index, file] of files.entries()) {
+          const submittedPath = paths[index]!;
+          try {
+            const path = repositoryPath(submittedPath);
+            assertRepositoryFileSafe(path, file.buffer);
+            artifacts.push(await options.workspace!.ingest({
+              roomId: String(request.params.roomId),
+              filename: path,
+              mediaType: file.mimetype || "application/octet-stream",
+              bytes: file.buffer,
+              sourceType: "repository"
+            }));
+          } catch (error) {
+            failures.push({
+              path: submittedPath,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        }
+        response.status(201).json({ artifacts, failures });
       })
     );
 
@@ -542,6 +962,10 @@ export function createHttpApplication(options: ApplicationOptions): express.Expr
       return;
     }
     const message = error instanceof Error ? error.message : "Unknown error";
+    if (error instanceof multer.MulterError) {
+      response.status(413).json({ error: message });
+      return;
+    }
     const explicitStatus = typeof error === "object" && error !== null &&
       "status" in error && typeof error.status === "number" &&
       error.status >= 400 && error.status < 500

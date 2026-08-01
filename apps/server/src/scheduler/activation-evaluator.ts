@@ -27,6 +27,17 @@ export class ParticipantModelActivationEvaluator {
   async evaluate(input: ActivationEvaluationInput): Promise<ActivationDecision> {
     const provider = this.providers.get(input.agent.provider);
     if (!provider) throw new Error(`Provider is not configured: ${input.agent.provider}`);
+    const eventSpeaker = input.room.agents.find(agent =>
+      agent.id === input.eventMessage.authorId
+    )?.name ?? (input.eventMessage.authorType === "human"
+      ? "Human"
+      : input.eventMessage.authorId);
+    const styleInstruction = {
+      conversation: "Favor a balanced natural conversation; join when you have a distinct useful move.",
+      hollywood: "Favor energetic crosstalk. Be willing to riff, mutate an idea, punch up, or react directly to another voice; keep the eventual intervention short.",
+      debate: "Favor substantive engagement with claims: steelman, challenge, defend, rebut, request evidence, or expose assumptions.",
+      "deep-study": "Be selective. Speak when your specialty or private evidence can materially deepen the answer; avoid rapid reactive crosstalk."
+    }[input.room.room.settings.conversationStyle];
     const recent = input.room.messages.slice(-6).map(message => {
       const speaker = input.room.agents.find(agent => agent.id === message.authorId)?.name
         ?? (message.authorType === "human" ? "Human" : message.authorId);
@@ -40,14 +51,18 @@ export class ParticipantModelActivationEvaluator {
           content: [
             `You decide whether ${input.agent.name} should speak in a group discussion.`,
             `Specialization: ${input.agent.description}`,
+            "The current event may be from the human or another model participant.",
+            "On another participant's event, speak when you can challenge, extend, connect, clarify, or add distinct evidence.",
+            "Do not behave as though only human-authored messages deserve a reply.",
+            styleInstruction,
             "Return one JSON object only with shouldRespond, urgency, confidence,",
-            "intendedMove, targetMessageId, and a compact reason.",
+            "intendedMove and a compact reason. Do not invent message IDs.",
             "Silence is good when the contribution would be redundant."
           ].join("\n")
         },
         {
           role: "user",
-          content: `Recent room:\n${recent}\n\nCurrent event:\n${input.eventMessage.content}`
+          content: `Recent room:\n${recent}\n\nCurrent event from [${eventSpeaker}]:\n${input.eventMessage.content}`
         }
       ],
       temperature: 0,
@@ -55,6 +70,7 @@ export class ParticipantModelActivationEvaluator {
       reasoning: { enabled: false, displayMode: "hidden" },
       tools: [],
       sessionId: `${input.room.room.id}:${input.agent.id}:activation`,
+      signal: AbortSignal.timeout(60_000),
       ...(input.agent.capabilities?.structuredOutput
         ? {
           structuredOutput: {
@@ -68,7 +84,6 @@ export class ParticipantModelActivationEvaluator {
                 shouldRespond: { type: "boolean" },
                 urgency: { type: "number", minimum: 0, maximum: 1 },
                 confidence: { type: "number", minimum: 0, maximum: 1 },
-                targetMessageId: { type: "string" },
                 intendedMove: {
                   type: "string",
                   enum: [

@@ -12,8 +12,10 @@ export const reasoningEffortSchema = z.enum([
   "low",
   "medium",
   "high",
-  "xhigh"
+  "xhigh",
+  "max"
 ]);
+export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
 
 export const reasoningConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -40,6 +42,13 @@ export interface ModelDescriptor {
   id: string;
   name: string;
   capabilities: ModelCapabilities;
+  reasoning?: {
+    supportedEfforts?: Array<ReasoningEffort | "none"> | null;
+    defaultEffort?: ReasoningEffort | "none";
+    defaultEnabled?: boolean;
+    supportsMaxTokens?: boolean;
+    mandatory?: boolean;
+  };
 }
 
 export const defaultModelSelectionSchema = z.object({
@@ -55,6 +64,9 @@ export const defaultRoomToolNames = [
   "find_exact_text",
   "read_artifact_chunk",
   "read_artifact_range",
+  "ask_table_researcher",
+  "search_conversation_history",
+  "read_message_range",
   "read_shared_scratchpad",
   "append_shared_note",
   "update_shared_note",
@@ -64,6 +76,7 @@ export const defaultRoomToolNames = [
 ] as const;
 
 export const contextBudgetSchema = z.object({
+  automatic: z.boolean().optional(),
   softLimitTokens: z.number().int().positive(),
   hardLimitTokens: z.number().int().positive(),
   recentTranscriptTokens: z.number().int().nonnegative(),
@@ -74,6 +87,86 @@ export const contextBudgetSchema = z.object({
   "soft limit must not exceed hard limit"
 );
 export type ContextBudget = z.infer<typeof contextBudgetSchema>;
+
+export interface EffectiveContextPolicy {
+  advertisedContextTokens: number;
+  workingLimitTokens: number;
+  hardLimitTokens: number;
+  systemPersonaTokens: number;
+  retrievedContextTokens: number;
+  recentTranscriptTokens: number;
+  compactionTriggerTokens: number;
+  automatic: boolean;
+}
+
+export function deriveContextPolicy(input: {
+  contextBudget: ContextBudget;
+  modelContextLength?: number | undefined;
+}): EffectiveContextPolicy {
+  const configured = input.contextBudget;
+  const advertisedContextTokens = Math.max(
+    1,
+    input.modelContextLength ?? configured.hardLimitTokens
+  );
+  const automatic = configured.automatic === true;
+  if (!automatic) {
+    const hardLimitTokens = Math.min(
+      configured.hardLimitTokens,
+      advertisedContextTokens
+    );
+    const workingLimitTokens = Math.min(
+      configured.softLimitTokens,
+      hardLimitTokens
+    );
+    const recentTranscriptTokens = Math.min(
+      configured.recentTranscriptTokens,
+      workingLimitTokens
+    );
+    return {
+      advertisedContextTokens,
+      workingLimitTokens,
+      hardLimitTokens,
+      systemPersonaTokens: Math.max(256, Math.floor(workingLimitTokens / 6)),
+      retrievedContextTokens: Math.min(
+        configured.retrievedContextTokens,
+        workingLimitTokens
+      ),
+      recentTranscriptTokens,
+      compactionTriggerTokens: Math.max(
+        1,
+        Math.floor(recentTranscriptTokens * 0.7)
+      ),
+      automatic
+    };
+  }
+
+  const isLargeContextModel = advertisedContextTokens >= 512_000;
+  const workingLimitTokens = advertisedContextTokens <= 192_000
+    ? Math.min(advertisedContextTokens, 128_000)
+    : Math.min(advertisedContextTokens, 256_000);
+  const hardLimitTokens = isLargeContextModel
+    ? Math.min(advertisedContextTokens, 512_000)
+    : workingLimitTokens;
+  // The requested 1:2:3 weighting is normalized to a six-part window so all
+  // three allocations can coexist without exceeding the model context.
+  const systemPersonaTokens = Math.floor(workingLimitTokens / 6);
+  const retrievedContextTokens = Math.floor(workingLimitTokens / 3);
+  const recentTranscriptTokens =
+    workingLimitTokens - systemPersonaTokens - retrievedContextTokens;
+  return {
+    advertisedContextTokens,
+    workingLimitTokens,
+    hardLimitTokens,
+    systemPersonaTokens,
+    retrievedContextTokens,
+    recentTranscriptTokens,
+    compactionTriggerTokens: Math.max(
+      1,
+      Math.floor(recentTranscriptTokens * 0.7)
+    ),
+    automatic
+  };
+}
 
 const systemPromptSchema = z.string().trim().min(1);
 const personaPromptSchema = z.string().trim();
@@ -118,10 +211,11 @@ export function createDefaultVoiceConfiguration(): Pick<
     },
     tools: [...defaultRoomToolNames],
     contextBudget: {
+      automatic: true,
       softLimitTokens: 240_000,
-      hardLimitTokens: 320_000,
-      recentTranscriptTokens: 140_000,
-      retrievedContextTokens: 48_000,
+      hardLimitTokens: 512_000,
+      recentTranscriptTokens: 128_000,
+      retrievedContextTokens: 85_333,
       notebookTokens: 0
     }
   };
@@ -165,8 +259,28 @@ export const voiceTemplateSchema = voiceTemplateInputSchema.extend({
 });
 export type VoiceTemplate = z.infer<typeof voiceTemplateSchema>;
 
+export const voiceTemplateLibraryItemSchema = z.object({
+  id: z.string().min(1),
+  voiceTemplateId: z.string().min(1),
+  filename: z.string().trim().min(1).max(500),
+  mediaType: z.string().trim().min(1).max(200),
+  sha256: z.string().length(64),
+  byteSize: z.number().int().nonnegative(),
+  summary: z.string(),
+  outline: z.string().optional(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type VoiceTemplateLibraryItem = z.infer<
+  typeof voiceTemplateLibraryItemSchema
+>;
+
 export const roomSettingsSchema = z.object({
   autoMode: z.boolean().default(true),
+  conversationStyle: z.enum([
+    "conversation", "hollywood", "debate", "deep-study"
+  ]).default("conversation"),
+  deliberationTurns: z.number().int().min(1).max(3).default(1),
   maxResponders: z.number().int().min(1).max(3).default(2),
   maxAutonomousWaves: z.number().int().min(1).max(12).default(3),
   maxAutonomousReplies: z.number().int().min(1).max(24).default(6),
@@ -179,6 +293,53 @@ export const roomSettingsSchema = z.object({
 export type RoomSettings = z.infer<typeof roomSettingsSchema>;
 
 export const defaultRoomSettings: RoomSettings = roomSettingsSchema.parse({});
+
+export const roomModePresets = {
+  conversation: roomSettingsSchema.parse({
+    conversationStyle: "conversation",
+    deliberationTurns: 1,
+    maxResponders: 2,
+    maxAutonomousWaves: 3,
+    maxAutonomousReplies: 6,
+    agentContinuation: true,
+    jitter: 0.04,
+    responseLength: "medium",
+    fatigueThreshold: 0.72
+  }),
+  hollywood: roomSettingsSchema.parse({
+    conversationStyle: "hollywood",
+    deliberationTurns: 1,
+    maxResponders: 3,
+    maxAutonomousWaves: 8,
+    maxAutonomousReplies: 18,
+    agentContinuation: true,
+    jitter: 0.12,
+    responseLength: "short",
+    fatigueThreshold: 0.82
+  }),
+  debate: roomSettingsSchema.parse({
+    conversationStyle: "debate",
+    deliberationTurns: 1,
+    maxResponders: 2,
+    maxAutonomousWaves: 6,
+    maxAutonomousReplies: 12,
+    agentContinuation: true,
+    jitter: 0.02,
+    responseLength: "medium",
+    fatigueThreshold: 0.78
+  }),
+  "deep-study": roomSettingsSchema.parse({
+    conversationStyle: "deep-study",
+    deliberationTurns: 3,
+    maxResponders: 1,
+    maxAutonomousWaves: 3,
+    maxAutonomousReplies: 3,
+    agentContinuation: true,
+    jitter: 0,
+    responseLength: "long",
+    fatigueThreshold: 0.72
+  })
+} satisfies Record<RoomSettings["conversationStyle"], RoomSettings>;
 
 export const roomSchema = z.object({
   id: z.string().min(1),
@@ -218,6 +379,56 @@ export const roomMessageSchema = z.object({
   sequence: z.number().int().nonnegative()
 });
 export type RoomMessage = z.infer<typeof roomMessageSchema>;
+
+export const conversationEpisodeSchema = z.object({
+  id: z.string().min(1),
+  roomId: z.string().min(1),
+  firstMessageId: z.string().min(1),
+  lastMessageId: z.string().min(1),
+  firstSequence: z.number().int().nonnegative(),
+  lastSequence: z.number().int().nonnegative(),
+  title: z.string().min(1),
+  summary: z.string(),
+  tokenCount: z.number().int().nonnegative(),
+  sourceTokenCount: z.number().int().nonnegative(),
+  createdAt: z.string().datetime()
+});
+export type ConversationEpisode = z.infer<typeof conversationEpisodeSchema>;
+
+export const ROOM_PRESSURE_POLICY = {
+  halfLifeMs: 600_000,
+  elevatedThreshold: 3,
+  wrapThreshold: 5,
+  hardThreshold: 7,
+  maximumAgeHalfLives: 6
+} as const;
+
+export function calculateRoomPressure(
+  messages: readonly RoomMessage[],
+  nowMs: number,
+  halfLifeMs: number = ROOM_PRESSURE_POLICY.halfLifeMs
+): number {
+  let pressure = 0;
+  for (const message of messages) {
+    if (
+      message.authorType !== "agent" ||
+      message.lifecycle !== "active" ||
+      message.status !== "complete"
+    ) {
+      continue;
+    }
+    const ageMs = nowMs - Date.parse(message.createdAt);
+    if (
+      !Number.isFinite(ageMs) ||
+      ageMs < 0 ||
+      ageMs > halfLifeMs * ROOM_PRESSURE_POLICY.maximumAgeHalfLives
+    ) {
+      continue;
+    }
+    pressure += 2 ** (-ageMs / halfLifeMs);
+  }
+  return pressure;
+}
 
 export const intendedMoveSchema = z.enum([
   "answer",
@@ -266,6 +477,12 @@ export const generationRecordSchema = z.object({
   finalText: z.string().default(""),
   reasoningText: z.string().optional(),
   reasoningSummary: z.string().optional(),
+  reasoningConfig: reasoningConfigSchema.optional(),
+  deliberationPasses: z.array(z.object({
+    ordinal: z.number().int().positive(),
+    text: z.string(),
+    createdAt: z.string().datetime()
+  })).optional(),
   retrievedChunkIds: z.array(z.string()).default([]),
   inputTokens: z.number().int().nonnegative().optional(),
   outputTokens: z.number().int().nonnegative().optional(),
@@ -328,7 +545,11 @@ export const artifactSchema = z.object({
   mediaType: z.string(),
   sha256: z.string().length(64),
   byteSize: z.number().int().nonnegative(),
-  sourceType: z.enum(["upload", "paste", "generated", "repository", "url"]),
+  sourceType: z.enum([
+    "upload", "paste", "generated", "repository", "persona-memory", "url"
+  ]),
+  ownerAgentId: z.string().min(1).optional(),
+  voiceTemplateLibraryItemId: z.string().min(1).optional(),
   title: z.string().optional(),
   summary: z.string(),
   outline: z.string().optional(),
@@ -384,7 +605,14 @@ export type RoomStreamEvent =
   | { sequence: number; type: "artifact.updated"; artifact: WorkspaceArtifact }
   | { sequence: number; type: "artifact.deleted"; artifactId: string }
   | { sequence: number; type: "scratchpad.updated"; note: SharedNote }
-  | { sequence: number; type: "activation.recorded"; agentId: string; decision: ActivationDecision; score: number }
+  | {
+      sequence: number;
+      type: "activation.recorded";
+      agentId: string;
+      decision: ActivationDecision;
+      score: number;
+      source: "participant" | "scheduler";
+    }
   | { sequence: number; type: "system.error"; message: string };
 
 export type RoomStreamEventInput =
@@ -402,11 +630,13 @@ export interface RoomSnapshot {
   runtime: AgentRuntimeState[];
   artifacts: WorkspaceArtifact[];
   notes: SharedNote[];
+  episodes?: ConversationEpisode[];
   activations: Array<{
     sequence: number;
     agentId: string;
     decision: ActivationDecision;
     score: number;
+    source: "participant" | "scheduler";
   }>;
   latestSequence: number;
 }
