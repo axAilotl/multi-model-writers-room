@@ -58,10 +58,14 @@ const browserProvider = {
       yield { type: "done", finishReason: "stop" };
       return;
     }
+    yield {
+      type: "text-delta",
+      text: "## Architecture finding\n\n**Streaming evidence:** "
+    };
     await participantResponseGate;
     yield {
       type: "text-delta",
-      text: "One concrete failure mode is stale scheduler selection after a participant leaves the room. Revalidate membership immediately before generation."
+      text: "one concrete failure mode is stale scheduler selection after a participant leaves the room. Revalidate membership immediately before generation."
     };
     yield { type: "usage", inputTokens: 120, outputTokens: 24, costUsd: 0.001 };
     yield { type: "done", finishReason: "stop" };
@@ -374,6 +378,28 @@ try {
     "The selected @ mention was not persisted as a direct target"
   );
 
+  const markdownPrompt = [
+    "## Markdown browser check",
+    "",
+    "**Bold evidence** with `inlineCode()`.",
+    "",
+    "| Item | State |",
+    "| --- | --- |",
+    "| renderer | ready |"
+  ].join("\n");
+  await mentionComposer.fill(markdownPrompt);
+  await mentionComposer.press("Enter");
+  const markdownMessage = page.locator(".human-message").filter({
+    hasText: "Markdown browser check"
+  });
+  await markdownMessage.locator("h2").waitFor();
+  assert.equal(
+    await markdownMessage.locator(".message-copy strong").innerText(),
+    "Bold evidence"
+  );
+  assert.equal(await markdownMessage.locator("table").count(), 1);
+  assert.equal(await markdownMessage.locator("code").innerText(), "inlineCode()");
+
   const prompt = "Identify one concrete failure mode in this room design.";
   await page.locator(".composer textarea").fill(prompt);
   await page.locator(".composer textarea").press("Enter");
@@ -390,6 +416,14 @@ try {
       generation => generation.status === "streaming"
     ),
     "The real speaker endpoint never persisted a streaming generation"
+  );
+  const streamingMarkdown = page.locator(".agent-message").filter({
+    hasText: "Streaming evidence"
+  });
+  await streamingMarkdown.locator("h2").waitFor();
+  assert.equal(
+    await streamingMarkdown.locator(".message-copy strong").innerText(),
+    "Streaming evidence:"
   );
   const settingsButton = page.getByRole("button", { name: "Open settings" });
   assert.equal(await settingsButton.isEnabled(), true, "Settings was locked during generation");
@@ -426,14 +460,16 @@ try {
   await page.getByRole("button", { name: "Manage rooms" }).click();
   await page.getByRole("button", { name: "Switch to Browser verification room" }).click();
   await page.getByRole("heading", { name: "Browser verification room" }).waitFor();
-  const renderedReply = page.locator(".agent-message .message-copy").filter({
-    hasText: completedReply.slice(0, 120)
+  const renderedReply = page.locator(".agent-message").filter({
+    hasText: "one concrete failure mode is stale scheduler selection"
   });
   await renderedReply.waitFor();
-  assert.ok(
-    (await renderedReply.innerText()).includes(completedReply.slice(0, 120)),
-    "The completed participant response did not render"
+  assert.equal(await renderedReply.locator("h2").innerText(), "Architecture finding");
+  assert.equal(
+    await renderedReply.locator(".message-copy strong").innerText(),
+    "Streaming evidence:"
   );
+  assert.match(completedReply, /^## Architecture finding/);
 
   await page.getByRole("button", {
     name: "Remove Browser Reviewer from room"
@@ -514,6 +550,8 @@ try {
     directMentionPersisted: true,
     linkedVoiceRenamePropagated: true,
     chatResetRetainedRoomResources: true,
+    markdownMessagesRendered: true,
+    streamedAgentMarkdownRendered: true,
     consoleErrors: 0,
     pageErrors: 0,
     failedApiResponses: 0,

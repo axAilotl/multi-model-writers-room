@@ -54,6 +54,7 @@ import {
   voiceTemplateInput
 } from "./voice-template.js";
 import { validationMessage } from "./validation.js";
+import { MarkdownMessage } from "./markdown-message.js";
 
 const participantColors = ["#c96c47", "#637d68", "#7566a3", "#b08a3f", "#477b8f"];
 
@@ -232,7 +233,9 @@ function Conversation({ snapshot, busy, onDeleteTail, onRegenerateTail }: {
                 {message.status === "streaming" && <LoaderCircle size={13} className="spin" />}
               </header>
               <div className="message-copy">
-                {message.content || <span className="thinking">Gathering a thought…</span>}
+                {message.content
+                  ? <MarkdownMessage content={message.content} />
+                  : <span className="thinking">Gathering a thought…</span>}
               </div>
               {generation && (
                 <MessageDetails

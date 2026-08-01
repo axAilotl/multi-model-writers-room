@@ -147,8 +147,34 @@ button { color: inherit; }
 .message-body header strong { font-size: 12px; }
 .message-body header span { font-size: 9px; color: #9b968a; }
 .reply-label { background: #eeeae0; padding: 2px 5px; border-radius: 4px; text-transform: uppercase; letter-spacing: .06em; }
-.message-copy { color: #37352f; font-family: Georgia, serif; font-size: 16px; line-height: 1.58; white-space: pre-wrap; }
+.message-copy { color: #37352f; font-family: Georgia, serif; font-size: 16px; line-height: 1.58; }
 .human-message .message-copy { font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 13px; line-height: 1.5; background: #f0eee7; border: 1px solid #e3dfd4; padding: 10px 12px; border-radius: 3px 11px 11px 11px; }
+.markdown-message { min-width: 0; overflow-wrap: anywhere; }
+.markdown-message > :first-child { margin-top: 0; }
+.markdown-message > :last-child { margin-bottom: 0; }
+.markdown-message p { margin: .55em 0; }
+.markdown-message h1, .markdown-message h2, .markdown-message h3, .markdown-message h4 { margin: 1em 0 .42em; color: #292721; font-family: Inter, ui-sans-serif, system-ui, sans-serif; line-height: 1.25; }
+.markdown-message h1 { font-size: 1.45em; }
+.markdown-message h2 { font-size: 1.25em; }
+.markdown-message h3 { font-size: 1.08em; }
+.markdown-message h4 { font-size: 1em; }
+.markdown-message ul, .markdown-message ol { margin: .55em 0; padding-left: 1.5em; }
+.markdown-message li { margin: .2em 0; }
+.markdown-message li > p { margin: .2em 0; }
+.markdown-message blockquote { margin: .75em 0; padding: .15em 0 .15em .85em; border-left: 3px solid #cfc6b6; color: #686257; }
+.markdown-message a { color: #8b4f35; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.markdown-message a:hover { color: #62331f; }
+.markdown-message code { padding: .13em .3em; border-radius: 4px; background: #ece8de; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .82em; }
+.markdown-message pre { max-width: 100%; margin: .75em 0; padding: .8em .9em; overflow-x: auto; border: 1px solid #d8d2c6; border-radius: 6px; background: #292824; color: #f3f0e7; line-height: 1.45; }
+.markdown-message pre code { padding: 0; background: transparent; color: inherit; font-size: .76em; }
+.markdown-message table { display: block; width: max-content; max-width: 100%; margin: .75em 0; overflow-x: auto; border-collapse: collapse; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: .72em; }
+.markdown-message th, .markdown-message td { padding: .42em .65em; border: 1px solid #d8d2c6; text-align: left; }
+.markdown-message th { background: #eeebe3; font-weight: 650; }
+.markdown-message hr { margin: 1em 0; border: 0; border-top: 1px solid #d8d2c6; }
+.markdown-message img { display: block; max-width: 100%; height: auto; margin: .75em 0; border-radius: 6px; }
+.markdown-remote-image, .markdown-image-unavailable { display: inline-block; padding: .2em .45em; border: 1px solid #d8d2c6; border-radius: 4px; background: #f2efe8; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: .72em; }
+.markdown-image-unavailable { color: #817b70; }
+.markdown-message input[type="checkbox"] { margin-right: .45em; accent-color: var(--accent); }
 .thinking { color: #aaa497; font-style: italic; }
 .message-details { margin-top: 8px; }
 .detail-toggle { border: 0; background: transparent; color: #8b867b; display: flex; align-items: center; gap: 5px; padding: 3px 0; font-size: 9px; cursor: pointer; text-transform: uppercase; letter-spacing: .08em; }
