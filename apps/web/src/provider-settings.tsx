@@ -5,7 +5,10 @@ import type {
   DefaultModelSelection,
   ProviderConnectionStatus
 } from "@writers-room/contracts";
-import { PSFN_DEFAULT_CONTEXT_LENGTH } from "@writers-room/contracts";
+import {
+  PSFN_DEFAULT_CONTEXT_LENGTH,
+  PSFN_MAX_CONTEXT_LENGTH
+} from "@writers-room/contracts";
 import { api } from "./api.js";
 import { providerLabels } from "./provider-labels.js";
 import {
@@ -317,7 +320,7 @@ export function ProviderSettings() {
                 <input
                   type="number"
                   min={4_096}
-                  max={PSFN_DEFAULT_CONTEXT_LENGTH}
+                  max={PSFN_MAX_CONTEXT_LENGTH}
                   value={contextLength}
                   onChange={event => setContextLength(Number(event.target.value))}
                 />

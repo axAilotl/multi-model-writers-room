@@ -1,5 +1,6 @@
 import {
   PSFN_DEFAULT_CONTEXT_LENGTH,
+  PSFN_MAX_CONTEXT_LENGTH,
   providerConnectionStatusSchema,
   providerConnectionUpdateSchema,
   providerKinds,
@@ -105,7 +106,7 @@ function environmentConfigurations(environment: Environment, psfnEnabled: boolea
       sessionMode: environment.PSFN_SESSION_MODE === "fixed" ? "fixed" : "header",
       ...(expectedCompanionId === undefined ? {} : { expectedCompanionId }),
       contextLength: Number.isInteger(parsedContextLength) && parsedContextLength >= 4_096
-        ? Math.min(parsedContextLength, PSFN_DEFAULT_CONTEXT_LENGTH)
+        ? Math.min(parsedContextLength, PSFN_MAX_CONTEXT_LENGTH)
         : PSFN_DEFAULT_CONTEXT_LENGTH,
       allowInsecureHttp
     });

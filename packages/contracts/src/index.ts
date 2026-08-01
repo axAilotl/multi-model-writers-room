@@ -8,6 +8,7 @@ export const providerKinds = [
 ] as const;
 
 export const PSFN_DEFAULT_CONTEXT_LENGTH = 1_000_000;
+export const PSFN_MAX_CONTEXT_LENGTH = 1_000_000;
 export const providerKindSchema = z.enum(providerKinds);
 export type ProviderKind = z.infer<typeof providerKindSchema>;
 
@@ -17,7 +18,7 @@ export const providerConnectionConfigurationSchema = z.object({
   apiKey: z.string().min(1).max(32_768).optional(),
   sessionMode: z.enum(["fixed", "header"]).optional(),
   expectedCompanionId: z.string().trim().min(1).max(200).optional(),
-  contextLength: z.number().int().min(4_096).max(1_000_000).optional(),
+  contextLength: z.number().int().min(4_096).max(PSFN_MAX_CONTEXT_LENGTH).optional(),
   allowInsecureHttp: z.boolean().optional()
 });
 export type ProviderConnectionConfiguration = z.infer<
@@ -29,7 +30,7 @@ export const providerConnectionUpdateSchema = z.object({
   apiKey: z.string().min(1).max(32_768).optional(),
   sessionMode: z.enum(["fixed", "header"]).optional(),
   expectedCompanionId: z.string().trim().min(1).max(200).optional(),
-  contextLength: z.number().int().min(4_096).max(1_000_000).optional(),
+  contextLength: z.number().int().min(4_096).max(PSFN_MAX_CONTEXT_LENGTH).optional(),
   allowInsecureHttp: z.boolean().optional(),
   acceptIdentityChange: z.boolean().optional()
 });
