@@ -3,10 +3,12 @@ import {
   type ActivationDecision,
   type AgentDefinition,
   type NormalizedChatRequest,
+  type ReasoningConfig,
+  type ReasoningEffort,
   type RoomMessage,
   type RoomSnapshot
 } from "@writers-room/contracts";
-import type { ModelProvider } from "../providers/model-provider.js";
+import type { ModelDescriptor, ModelProvider } from "../providers/model-provider.js";
 
 export interface ActivationEvaluationInput {
   room: RoomSnapshot;
@@ -22,11 +24,17 @@ function extractJson(text: string): unknown {
 }
 
 export class ParticipantModelActivationEvaluator {
+  private readonly reasoningSupport = new Map<
+    string,
+    Promise<ModelDescriptor["reasoning"] | undefined>
+  >();
+
   constructor(private readonly providers: ReadonlyMap<string, ModelProvider>) {}
 
   async evaluate(input: ActivationEvaluationInput): Promise<ActivationDecision> {
     const provider = this.providers.get(input.agent.provider);
     if (!provider) throw new Error(`Provider is not configured: ${input.agent.provider}`);
+    const reasoning = await this.activationReasoning(provider, input.agent);
     const eventSpeaker = input.room.agents.find(agent =>
       agent.id === input.eventMessage.authorId
     )?.name ?? (input.eventMessage.authorType === "human"
@@ -66,8 +74,11 @@ export class ParticipantModelActivationEvaluator {
         }
       ],
       temperature: 0,
-      maxOutputTokens: 160,
-      reasoning: { enabled: false, displayMode: "hidden" },
+      // Reasoning-first models can spend a small completion entirely on hidden
+      // thinking and never emit the JSON decision. Minimal effort plus a real
+      // final-answer allowance keeps this housekeeping call bounded and usable.
+      maxOutputTokens: 768,
+      reasoning,
       tools: [],
       sessionId: `${input.room.room.id}:${input.agent.id}:activation`,
       signal: AbortSignal.timeout(60_000),
@@ -103,5 +114,51 @@ export class ParticipantModelActivationEvaluator {
       if (event.type === "text-delta") text += event.text;
     }
     return activationDecisionSchema.parse(extractJson(text));
+  }
+
+  private async activationReasoning(
+    provider: ModelProvider,
+    agent: AgentDefinition
+  ): Promise<ReasoningConfig> {
+    if (!agent.capabilities?.reasoningInputControl) {
+      return { enabled: false, displayMode: "hidden" };
+    }
+    const key = `${provider.id}\u0000${agent.modelId}`;
+    let lookup = this.reasoningSupport.get(key);
+    if (!lookup) {
+      lookup = provider.listModels()
+        .then(models => models.find(model => model.id === agent.modelId)?.reasoning)
+        .catch(() => undefined);
+      this.reasoningSupport.set(key, lookup);
+    }
+    const support = await lookup;
+    const effortOrder: ReasoningEffort[] = [
+      "minimal", "low", "medium", "high", "xhigh", "max"
+    ];
+    const supported = support?.supportedEfforts;
+    const effort = supported === null
+      ? "minimal"
+      : effortOrder.find(candidate => supported?.includes(candidate));
+    if (effort) {
+      return { enabled: true, effort, displayMode: "hidden" };
+    }
+    if (support?.supportsMaxTokens) {
+      return { enabled: true, maxTokens: 128, displayMode: "hidden" };
+    }
+    if (agent.reasoning.maxTokens !== undefined) {
+      return {
+        enabled: true,
+        maxTokens: Math.min(128, agent.reasoning.maxTokens),
+        displayMode: "hidden"
+      };
+    }
+    if (agent.reasoning.effort !== undefined) {
+      return {
+        enabled: true,
+        effort: agent.reasoning.effort,
+        displayMode: "hidden"
+      };
+    }
+    return { enabled: true, displayMode: "hidden" };
   }
 }

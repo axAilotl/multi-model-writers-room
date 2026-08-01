@@ -13,6 +13,7 @@
   --accent-dark: #99452c;
   --green: #637d68;
   --shadow: 0 18px 50px rgba(48, 43, 32, 0.08);
+  --topbar-height: 58px;
 }
 
 * { box-sizing: border-box; }
@@ -22,7 +23,8 @@ button { color: inherit; }
 
 .app-shell { min-height: 100vh; display: flex; flex-direction: column; }
 .topbar {
-  height: 58px; display: grid; grid-template-columns: 240px 1fr auto;
+  height: var(--topbar-height); flex: 0 0 var(--topbar-height);
+  display: grid; grid-template-columns: 240px 1fr auto;
   align-items: center; padding: 0 18px; background: #1d1c18; color: #f8f4e9;
   border-bottom: 1px solid #3a3831;
 }
@@ -60,8 +62,15 @@ button { color: inherit; }
 }
 .top-icon-button:hover { color: white; border-color: #68645a; }
 
-.room-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px minmax(520px, 1fr) 260px; }
-.left-panel, .right-panel { background: #f3f1ea; min-height: calc(100vh - 58px); overflow-y: auto; }
+.room-grid {
+  flex: 1; min-height: 0; height: calc(100vh - var(--topbar-height));
+  max-height: calc(100vh - var(--topbar-height));
+  display: grid; grid-template-columns: 280px minmax(520px, 1fr) 260px; overflow: hidden;
+}
+.left-panel, .right-panel {
+  height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-gutter: stable; background: #f3f1ea;
+}
 .left-panel { position: relative; border-right: 1px solid var(--line); }
 .left-panel.drag-active { outline: 2px solid #c75f3c; outline-offset: -2px; }
 .table-drop-overlay {
@@ -132,7 +141,7 @@ button { color: inherit; }
 .search-result strong { font-size: 10px; } .search-result span { font-size: 10px; color: var(--muted); margin: 3px 0; }
 .search-result code { font-size: 8px; color: #8b735d; overflow: hidden; text-overflow: ellipsis; }
 
-.center-panel { background: var(--paper); height: calc(100vh - 58px); min-width: 0; display: flex; flex-direction: column; }
+.center-panel { background: var(--paper); height: calc(100vh - var(--topbar-height)); min-width: 0; display: flex; flex-direction: column; }
 .conversation-heading { height: 78px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid #e6e2d8; }
 .eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: 9px; color: #928c7d; font-weight: 700; }
 .conversation-heading h1 { margin: 3px 0 0; font-family: Georgia, serif; font-size: 23px; }

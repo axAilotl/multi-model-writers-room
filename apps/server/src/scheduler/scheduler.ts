@@ -169,7 +169,7 @@ export class ConversationScheduler {
                 confidence: 1,
                 targetMessageId: trigger.id,
                 intendedMove: "answer",
-                reason: "Direct mention override after activation failure"
+                reason: "Direct mention override while activation check was unavailable"
               }
             : {
                 shouldRespond: false,
@@ -177,7 +177,7 @@ export class ConversationScheduler {
                 confidence: 0,
                 targetMessageId: trigger.id,
                 intendedMove: "defer",
-                reason: "Activation evaluation failed"
+                reason: "Activation check unavailable; yielded to the room arbiter"
               };
         }
         const recentSpeakerPenalty = runtime.consecutiveTurns > 0 ? 0.15 : 0;

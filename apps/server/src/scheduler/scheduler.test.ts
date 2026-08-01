@@ -352,6 +352,33 @@ describe("conversation scheduler seam", () => {
     expect(store.listMessages(room.id).at(-1)).toMatchObject({
       replyToMessageId: human.id
     });
+
+    const unavailableEvent = store.appendMessage({
+      roomId: room.id,
+      authorType: "human",
+      authorId: "human",
+      content: "Keep going even if a lightweight activation call is unavailable."
+    });
+    const unavailableScheduler = new ConversationScheduler({
+      store,
+      evaluator: {
+        evaluate: async () => {
+          throw new Error("fixture activation produced no final JSON");
+        }
+      },
+      generator
+    });
+    await unavailableScheduler.runFromHumanMessage(room.id, unavailableEvent.id);
+    const unavailableActivations = store.getSnapshot(room.id).activations.filter(
+      activation =>
+        activation.source === "participant" &&
+        activation.decision.targetMessageId === unavailableEvent.id
+    );
+    expect(unavailableActivations).toHaveLength(2);
+    expect(unavailableActivations.every(activation =>
+      !/failed/i.test(activation.decision.reason ?? "")
+    )).toBe(true);
+    expect(spoken).toHaveLength(2);
     store.close();
   });
 

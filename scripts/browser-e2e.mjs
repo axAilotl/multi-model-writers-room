@@ -625,6 +625,32 @@ try {
     .getByRole("button", { name: "Confirm delete" }).click();
   await page.getByRole("heading", { name: "Browser verification room" }).waitFor();
 
+  const tableLayout = await page.locator(".left-panel").evaluate(panel => {
+    const probe = document.createElement("div");
+    probe.dataset.layoutScrollProbe = "true";
+    probe.style.height = "2000px";
+    probe.style.pointerEvents = "none";
+    panel.append(probe);
+    const metrics = {
+      viewportHeight: window.innerHeight,
+      pageHeight: document.documentElement.scrollHeight,
+      panelClientHeight: panel.clientHeight,
+      panelScrollHeight: panel.scrollHeight,
+      overflowY: getComputedStyle(panel).overflowY
+    };
+    probe.remove();
+    return metrics;
+  });
+  assert.ok(
+    tableLayout.pageHeight <= tableLayout.viewportHeight + 1,
+    "A long table made the entire page scroll"
+  );
+  assert.ok(
+    tableLayout.panelScrollHeight > tableLayout.panelClientHeight,
+    "The table column did not own its vertical overflow"
+  );
+  assert.equal(tableLayout.overflowY, "auto", "The table column has no scrollbar");
+
   const bodyMetrics = await page.locator("body").evaluate(element => ({
     textLength: element.innerText.trim().length,
     horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth + 2
@@ -657,6 +683,7 @@ try {
     workspaceDragDropUploaded: true,
     workspaceArtifactRetried: true,
     workspaceArtifactDeleted: true,
+    tableOwnScroller: true,
     directMentionAutocomplete: true,
     directMentionPersisted: true,
     linkedVoiceRenamePropagated: true,
